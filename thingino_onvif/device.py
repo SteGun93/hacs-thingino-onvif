@@ -45,6 +45,7 @@ from .const import (
     DEFAULT_THINGINO_INFO_ENDPOINT,
     DEFAULT_THINGINO_EXTRAS_ENABLED,
     DEFAULT_THINGINO_EXTRAS_ENDPOINTS,
+    DEFAULT_THINGINO_EXEC_CANDIDATES,
     DEFAULT_THINGINO_EXEC_ENDPOINT,
     GET_CAPABILITIES_EXCEPTIONS,
     GOTOPRESET_MOVE,
@@ -107,6 +108,7 @@ class ONVIFDevice:
         self.thingino_extras_source: str | None = None
         self.thingino_extras_endpoint: str | None = None
         self.thingino_exec_endpoint: str | None = None
+        self.thingino_exec_available: bool = False
         self.thingino_aux_commands: list[ThinginoAuxCommand] = []
         self.thingino_aux_toggles: list[ThinginoToggle] = []
         self.thingino_relays: list[ThinginoRelay] = []
@@ -1165,15 +1167,30 @@ class ONVIFDevice:
             return None
 
         try:
-            ptz_service = await self.device.create_ptz_service()
+            ptz_service = await self._async_onvif_call(
+                "create_ptz_service", self.device.create_ptz_service
+            )
         except GET_CAPABILITIES_EXCEPTIONS as err:
             LOGGER.warning("%s: Failed to create PTZ service: %s", self.name, err)
             return None
         try:
             req = ptz_service.create_type("SetPreset")
             req.ProfileToken = profile.token
-            req.PresetToken = preset
+            await self.async_refresh_presets(profile)
+            preset_token = None
+            if profile.ptz and profile.ptz.presets:
+                if preset in profile.ptz.presets:
+                    preset_token = preset
+            if preset_token is not None:
+                req.PresetToken = preset_token
             req.PresetName = name or preset
+            LOGGER.debug(
+                "%s: SetPreset profile=%s preset=%s token_included=%s",
+                self.name,
+                profile.token,
+                preset,
+                preset_token is not None,
+            )
             token = await self._async_onvif_call(
                 "SetPreset", ptz_service.SetPreset, req
             )
@@ -1223,6 +1240,12 @@ class ONVIFDevice:
             if profile.ptz:
                 profile.ptz.presets = None
             return
+        LOGGER.debug(
+            "%s: Fetched PTZ presets for profile %s: %s",
+            self.name,
+            profile.token,
+            [preset.token for preset in presets if preset],
+        )
 
         tokens = [preset.token for preset in presets if preset]
         if profile.ptz is None:
@@ -1264,6 +1287,7 @@ class ONVIFDevice:
         )
         if self.thingino_exec_endpoint == "":
             self.thingino_exec_endpoint = None
+        await self._async_probe_thingino_exec(http_username, http_password)
 
         payload: dict[str, Any] | None = None
         endpoint_used: str | None = None
@@ -1371,6 +1395,49 @@ class ONVIFDevice:
         LOGGER.debug("%s: Thingino extras discovered at %s", self.name, endpoint)
         return payload
 
+    async def _async_probe_thingino_exec(
+        self, username: str | None, password: str | None
+    ) -> None:
+        """Probe Thingino exec endpoints to detect availability."""
+        candidates: list[str] = []
+        if self.thingino_exec_endpoint:
+            candidates.append(self.thingino_exec_endpoint)
+        candidates.extend(DEFAULT_THINGINO_EXEC_CANDIDATES)
+
+        session = async_get_clientsession(self.hass)
+        auth = aiohttp.BasicAuth(username, password) if username else None
+        for endpoint in candidates:
+            if not endpoint:
+                continue
+            url = self._build_thingino_url(endpoint)
+            try:
+                async with session.get(
+                    url,
+                    auth=auth,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as response:
+                    LOGGER.debug(
+                        "%s: Thingino exec probe %s status=%s",
+                        self.name,
+                        endpoint,
+                        response.status,
+                    )
+                    if response.status in (200, 401, 403):
+                        self.thingino_exec_endpoint = endpoint
+                        self.thingino_exec_available = True
+                        return
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                LOGGER.debug(
+                    "%s: Thingino exec probe failed for %s: %s",
+                    self.name,
+                    endpoint,
+                    err,
+                )
+
+        self.thingino_exec_available = False
+        self.thingino_exec_endpoint = None
+        LOGGER.debug("%s: Thingino exec endpoint unavailable", self.name)
+
     def _build_thingino_url(self, endpoint: str) -> str:
         """Build a full URL for a Thingino endpoint."""
         if endpoint.startswith("http://") or endpoint.startswith("https://"):
@@ -1383,6 +1450,15 @@ class ONVIFDevice:
         """Parse Thingino extras payload."""
         aux_commands: list[ThinginoAuxCommand] = []
         relays: list[ThinginoRelay] = []
+
+        if not self.thingino_exec_available:
+            LOGGER.debug(
+                "%s: Thingino exec unavailable; skipping aux/relay exec entities",
+                self.name,
+            )
+            self.thingino_aux_commands = []
+            self.thingino_aux_toggles = []
+            return
 
         for item in payload.get("aux") or []:
             if not isinstance(item, dict):

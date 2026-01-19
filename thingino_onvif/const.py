@@ -34,7 +34,12 @@ DEFAULT_THINGINO_EXTRAS_ENDPOINTS = (
     "/onvif.json",
     "/cgi-bin/onvif.json",
 )
-DEFAULT_THINGINO_EXEC_ENDPOINT = "/cgi-bin/thingino/exec"
+DEFAULT_THINGINO_EXEC_ENDPOINT = ""
+DEFAULT_THINGINO_EXEC_CANDIDATES = (
+    "/cgi-bin/thingino/exec",
+    "/cgi-bin/exec",
+    "/x/exec.cgi",
+)
 
 ATTR_PAN = "pan"
 ATTR_TILT = "tilt"
