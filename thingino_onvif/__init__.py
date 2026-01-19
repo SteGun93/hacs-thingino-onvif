@@ -121,7 +121,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         device.platforms += [Platform.SWITCH]
 
     if device.capabilities.ptz:
-        device.platforms += [Platform.SELECT]
+        device.platforms += [Platform.SELECT, Platform.TEXT]
 
     _async_migrate_camera_entities_unique_ids(hass, entry, device)
 

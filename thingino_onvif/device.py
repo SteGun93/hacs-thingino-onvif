@@ -112,6 +112,10 @@ class ONVIFDevice:
         self.thingino_aux_commands: list[ThinginoAuxCommand] = []
         self.thingino_aux_toggles: list[ThinginoToggle] = []
         self.thingino_relays: list[ThinginoRelay] = []
+        self._preset_name_map: dict[str, dict[str, str]] = {}
+        self._preset_token_name_map: dict[str, dict[str, str]] = {}
+        self._preset_selection: dict[str, str] = {}
+        self._preset_name_value: dict[str, str] = {}
 
     async def _async_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry
@@ -641,16 +645,20 @@ class ONVIFDevice:
                     presets = await self._async_onvif_call(
                         "GetPresets", ptz_service.GetPresets, profile.token
                     )
-                    profile.ptz.presets = [preset.token for preset in presets if preset]
+                    tokens, names = self._build_preset_cache(profile, presets)
+                    profile.ptz.presets = tokens
                     LOGGER.debug(
-                        "%s: PTZ presets for profile %s: %s",
+                        "%s: PTZ presets for profile %s: tokens=%s names=%s",
                         self.name,
                         profile.token,
-                        profile.ptz.presets,
+                        tokens,
+                        names,
                     )
                 except GET_CAPABILITIES_EXCEPTIONS as err:
                     # It's OK if Presets aren't supported
                     profile.ptz.presets = None
+                    self._preset_name_map.pop(profile.token, None)
+                    self._preset_token_name_map.pop(profile.token, None)
                     LOGGER.debug(
                         "%s: Could not fetch PTZ presets for profile %s: %s",
                         self.name,
@@ -1115,7 +1123,8 @@ class ONVIFDevice:
             elif move_mode == GOTOPRESET_MOVE:
                 # Guard against unsupported operation
                 if profile.ptz and profile.ptz.presets is not None:
-                    if preset_val not in profile.ptz.presets:
+                    preset_token = self._resolve_preset_token(profile, preset_val)
+                    if preset_token is None:
                         if not self.ptz_fallback:
                             LOGGER.warning(
                                 (
@@ -1132,6 +1141,22 @@ class ONVIFDevice:
                             self.name,
                             preset_val,
                         )
+                        return
+                    preset_val = preset_token
+                else:
+                    preset_val = self._resolve_preset_token(
+                        profile,
+                        preset_val,
+                        allow_unverified=profile.ptz is None or profile.ptz.presets is None,
+                    )
+                    if preset_val is None:
+                        LOGGER.warning(
+                            "%s: PTZ preset '%s' not found for profile %s",
+                            self.name,
+                            preset,
+                            profile.token,
+                        )
+                        return
 
                 req.PresetToken = preset_val
                 if speed_val is not None:
@@ -1235,12 +1260,31 @@ class ONVIFDevice:
         try:
             req = ptz_service.create_type("GotoPreset")
             req.ProfileToken = profile.token
-            req.PresetToken = preset
+            allow_unverified = profile.ptz is None or profile.ptz.presets is None
+            preset_token = self._resolve_preset_token(
+                profile, preset, allow_unverified=allow_unverified
+            )
+            if preset_token is None:
+                LOGGER.warning(
+                    "%s: PTZ preset '%s' not found for profile %s",
+                    self.name,
+                    preset,
+                    profile.token,
+                )
+                return
+            req.PresetToken = preset_token
             if speed is not None:
                 req.Speed = {
                     "PanTilt": {"x": speed, "y": speed},
                     "Zoom": {"x": speed},
                 }
+            LOGGER.debug(
+                "%s: GotoPreset profile=%s preset=%s token=%s",
+                self.name,
+                profile.token,
+                preset,
+                preset_token,
+            )
             await self._async_onvif_call("GotoPreset", ptz_service.GotoPreset, req)
         except ONVIFError as err:
             LOGGER.error("Error trying to go to PTZ preset '%s': %s", preset, err)
@@ -1267,19 +1311,17 @@ class ONVIFDevice:
             req = ptz_service.create_type("SetPreset")
             req.ProfileToken = profile.token
             await self.async_refresh_presets(profile)
-            preset_token = None
-            if profile.ptz and profile.ptz.presets:
-                if preset in profile.ptz.presets:
-                    preset_token = preset
+            preset_token = self._resolve_preset_token(profile, preset)
             if preset_token is not None:
                 req.PresetToken = preset_token
             req.PresetName = name or preset
             LOGGER.debug(
-                "%s: SetPreset profile=%s preset=%s token_included=%s",
+                "%s: SetPreset profile=%s preset=%s token_included=%s token=%s",
                 self.name,
                 profile.token,
                 preset,
                 preset_token is not None,
+                preset_token,
             )
             token = await self._async_onvif_call(
                 "SetPreset", ptz_service.SetPreset, req
@@ -1304,7 +1346,26 @@ class ONVIFDevice:
         try:
             req = ptz_service.create_type("RemovePreset")
             req.ProfileToken = profile.token
-            req.PresetToken = preset
+            allow_unverified = profile.ptz is None or profile.ptz.presets is None
+            preset_token = self._resolve_preset_token(
+                profile, preset, allow_unverified=allow_unverified
+            )
+            if preset_token is None:
+                LOGGER.warning(
+                    "%s: PTZ preset '%s' not found for profile %s",
+                    self.name,
+                    preset,
+                    profile.token,
+                )
+                return
+            req.PresetToken = preset_token
+            LOGGER.debug(
+                "%s: RemovePreset profile=%s preset=%s token=%s",
+                self.name,
+                profile.token,
+                preset,
+                preset_token,
+            )
             await self._async_onvif_call(
                 "RemovePreset", ptz_service.RemovePreset, req
             )
@@ -1329,19 +1390,104 @@ class ONVIFDevice:
             )
             if profile.ptz:
                 profile.ptz.presets = None
+            self._preset_name_map.pop(profile.token, None)
+            self._preset_token_name_map.pop(profile.token, None)
             return
+        tokens, names = self._build_preset_cache(profile, presets)
         LOGGER.debug(
-            "%s: Fetched PTZ presets for profile %s: %s",
+            "%s: Fetched PTZ presets for profile %s: tokens=%s names=%s",
             self.name,
             profile.token,
-            [preset.token for preset in presets if preset],
+            tokens,
+            names,
         )
 
-        tokens = [preset.token for preset in presets if preset]
         if profile.ptz is None:
             profile.ptz = PTZ(True, True, True, presets=tokens)
         else:
             profile.ptz.presets = tokens
+
+    def _build_preset_cache(
+        self, profile: Profile, presets: list[Any] | None
+    ) -> tuple[list[str], list[str]]:
+        """Build token list and name map for a profile's presets."""
+        tokens: list[str] = []
+        names: list[str] = []
+        name_map: dict[str, str] = {}
+        token_name_map: dict[str, str] = {}
+        for preset in presets or []:
+            if not preset:
+                continue
+            token = getattr(preset, "token", None) or getattr(preset, "Token", None)
+            if token is not None:
+                token = str(token)
+                tokens.append(token)
+            name = getattr(preset, "Name", None) or getattr(preset, "name", None)
+            if name and token:
+                name_str = str(name).strip()
+                if name_str:
+                    key = name_str.lower()
+                    if key not in name_map:
+                        name_map[key] = token
+                    if token not in token_name_map:
+                        token_name_map[token] = name_str
+                    names.append(name_str)
+        if name_map:
+            self._preset_name_map[profile.token] = name_map
+        else:
+            self._preset_name_map.pop(profile.token, None)
+        if token_name_map:
+            self._preset_token_name_map[profile.token] = token_name_map
+        else:
+            self._preset_token_name_map.pop(profile.token, None)
+        return tokens, names
+
+    def _resolve_preset_token(
+        self,
+        profile: Profile,
+        preset: str | None,
+        *,
+        allow_unverified: bool = False,
+    ) -> str | None:
+        """Resolve a preset name or token into a valid token."""
+        if not preset:
+            return None
+        if profile.ptz and profile.ptz.presets and preset in profile.ptz.presets:
+            return preset
+        name_map = self._preset_name_map.get(profile.token)
+        if name_map:
+            token = name_map.get(preset.strip().lower())
+            if token:
+                return token
+        if allow_unverified:
+            return preset
+        return None
+
+    def get_preset_name(self, profile: Profile, token: str) -> str | None:
+        """Return the friendly name for a preset token if known."""
+        return self._preset_token_name_map.get(profile.token, {}).get(token)
+
+    def set_selected_preset(self, profile: Profile, token: str | None) -> None:
+        """Store the currently selected preset token for a profile."""
+        if token:
+            self._preset_selection[profile.token] = token
+        else:
+            self._preset_selection.pop(profile.token, None)
+
+    def get_selected_preset(self, profile: Profile) -> str | None:
+        """Return the selected preset token for a profile."""
+        return self._preset_selection.get(profile.token)
+
+    def set_preset_name_value(self, profile: Profile, value: str | None) -> None:
+        """Store the preset name text for a profile."""
+        if value:
+            self._preset_name_value[profile.token] = value
+        else:
+            self._preset_name_value.pop(profile.token, None)
+
+    def get_preset_name_value(self, profile: Profile) -> str | None:
+        """Return the preset name text for a profile."""
+        return self._preset_name_value.get(profile.token)
 
     async def async_discover_thingino_extras(self) -> None:
         """Discover Thingino extras from ONVIF or HTTP endpoints."""

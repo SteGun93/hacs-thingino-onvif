@@ -5,12 +5,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.util import slugify
-
 from .const import DOMAIN
 from .device import ONVIFDevice
 from .entity import ONVIFBaseEntity
-from .models import ThinginoAuxCommand
+from .models import Profile, ThinginoAuxCommand
 
 
 async def async_setup_entry(
@@ -26,6 +24,10 @@ async def async_setup_entry(
     ]
     if device.capabilities.ptz:
         entities += [GotoHomeButton(device), SetHomeButton(device)]
+        for profile in device.profiles:
+            entities.append(ONVIFPresetGotoSelectedButton(device, profile))
+            entities.append(ONVIFPresetSaveSelectedButton(device, profile))
+            entities.append(ONVIFPresetDeleteSelectedButton(device, profile))
     entities += [
         ThinginoAuxButton(device, command) for command in device.thingino_aux_commands
     ]
@@ -111,3 +113,95 @@ class ThinginoAuxButton(ONVIFBaseEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Execute the command."""
         await self.device.async_thingino_exec(self.command.exec)
+
+
+class ONVIFPresetActionBase(ONVIFBaseEntity, ButtonEntity):
+    """Base class for preset action buttons."""
+
+    def __init__(self, device: ONVIFDevice, profile: Profile) -> None:
+        """Initialize the preset action."""
+        super().__init__(device)
+        self.profile = profile
+        profile_suffix = (
+            f" ({profile.name})" if len(device.profiles) > 1 and profile.name else ""
+        )
+        self._profile_suffix = profile_suffix
+
+    def _selected_token(self) -> str | None:
+        """Return the selected preset token."""
+        return self.device.get_selected_preset(self.profile)
+
+    def _selected_name(self, token: str | None) -> str | None:
+        """Return a friendly name for the selected token."""
+        if not token:
+            return None
+        return self.device.get_preset_name(self.profile, token) or token
+
+
+class ONVIFPresetGotoSelectedButton(ONVIFPresetActionBase):
+    """Button to go to the selected preset."""
+
+    _attr_icon = "mdi:map-marker"
+
+    def __init__(self, device: ONVIFDevice, profile: Profile) -> None:
+        """Initialize the goto preset button."""
+        super().__init__(device, profile)
+        self._attr_name = f"{self.device.name} Go to Preset{self._profile_suffix}"
+        self._attr_unique_id = f"{self.mac_or_serial}#{profile.token}_preset_goto"
+
+    async def async_press(self) -> None:
+        """Go to the selected preset."""
+        token = self._selected_token()
+        if not token:
+            return
+        await self.device.async_goto_preset(self.profile, token)
+
+
+class ONVIFPresetSaveSelectedButton(ONVIFPresetActionBase):
+    """Button to save or update a preset."""
+
+    _attr_icon = "mdi:content-save"
+
+    def __init__(self, device: ONVIFDevice, profile: Profile) -> None:
+        """Initialize the save preset button."""
+        super().__init__(device, profile)
+        self._attr_name = f"{self.device.name} Save Preset{self._profile_suffix}"
+        self._attr_unique_id = f"{self.mac_or_serial}#{profile.token}_preset_save"
+
+    async def async_press(self) -> None:
+        """Save the selected preset or create a new one."""
+        token = self._selected_token()
+        preset_name = (self.device.get_preset_name_value(self.profile) or "").strip()
+        if token:
+            name = preset_name or self._selected_name(token)
+            new_token = await self.device.async_set_preset(self.profile, token, name)
+        elif preset_name:
+            new_token = await self.device.async_set_preset(
+                self.profile, preset_name, preset_name
+            )
+        else:
+            return
+        await self.device.async_refresh_presets(self.profile)
+        if new_token:
+            self.device.set_selected_preset(self.profile, new_token)
+
+
+class ONVIFPresetDeleteSelectedButton(ONVIFPresetActionBase):
+    """Button to delete a preset."""
+
+    _attr_icon = "mdi:delete"
+
+    def __init__(self, device: ONVIFDevice, profile: Profile) -> None:
+        """Initialize the delete preset button."""
+        super().__init__(device, profile)
+        self._attr_name = f"{self.device.name} Delete Preset{self._profile_suffix}"
+        self._attr_unique_id = f"{self.mac_or_serial}#{profile.token}_preset_delete"
+
+    async def async_press(self) -> None:
+        """Delete the selected preset."""
+        token = self._selected_token()
+        if not token:
+            return
+        await self.device.async_remove_preset(self.profile, token)
+        await self.device.async_refresh_presets(self.profile)
+        self.device.set_selected_preset(self.profile, None)
