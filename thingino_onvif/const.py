@@ -19,6 +19,18 @@ CONF_HARDWARE = "hardware"
 CONF_SNAPSHOT_AUTH = "snapshot_auth"
 CONF_ENABLE_WEBHOOKS = "enable_webhooks"
 DEFAULT_ENABLE_WEBHOOKS = True
+CONF_THINGINO_EXTRAS_ENABLED = "thingino_extras_enabled"
+CONF_THINGINO_EXTRAS_ENDPOINT = "thingino_extras_endpoint"
+CONF_THINGINO_EXEC_ENDPOINT = "thingino_exec_endpoint"
+CONF_THINGINO_EXTRAS_JSON = "thingino_extras_json"
+
+DEFAULT_THINGINO_EXTRAS_ENABLED = True
+DEFAULT_THINGINO_EXTRAS_ENDPOINTS = (
+    "/etc/onvif.json",
+    "/onvif.json",
+    "/cgi-bin/onvif.json",
+)
+DEFAULT_THINGINO_EXEC_ENDPOINT = "/cgi-bin/thingino/exec"
 
 ATTR_PAN = "pan"
 ATTR_TILT = "tilt"

@@ -26,8 +26,14 @@ from homeassistant.helpers import entity_registry as er
 from .const import (
     CONF_ENABLE_WEBHOOKS,
     CONF_SNAPSHOT_AUTH,
+    CONF_THINGINO_EXTRAS_ENABLED,
+    CONF_THINGINO_EXTRAS_ENDPOINT,
+    CONF_THINGINO_EXTRAS_JSON,
+    CONF_THINGINO_EXEC_ENDPOINT,
     DEFAULT_ARGUMENTS,
     DEFAULT_ENABLE_WEBHOOKS,
+    DEFAULT_THINGINO_EXTRAS_ENABLED,
+    DEFAULT_THINGINO_EXEC_ENDPOINT,
     DOMAIN,
 )
 from .device import ONVIFDevice
@@ -103,7 +109,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if device.capabilities.events:
         device.platforms += [Platform.BINARY_SENSOR, Platform.SENSOR]
 
-    if device.capabilities.imaging:
+    if (
+        device.capabilities.imaging
+        or device.thingino_relays
+        or device.thingino_aux_toggles
+    ):
         device.platforms += [Platform.SWITCH]
 
     if device.capabilities.ptz:
@@ -167,6 +177,10 @@ async def async_populate_options(hass: HomeAssistant, entry: ConfigEntry) -> Non
         CONF_EXTRA_ARGUMENTS: DEFAULT_ARGUMENTS,
         CONF_RTSP_TRANSPORT: next(iter(RTSP_TRANSPORTS)),
         CONF_ENABLE_WEBHOOKS: DEFAULT_ENABLE_WEBHOOKS,
+        CONF_THINGINO_EXTRAS_ENABLED: DEFAULT_THINGINO_EXTRAS_ENABLED,
+        CONF_THINGINO_EXTRAS_ENDPOINT: "",
+        CONF_THINGINO_EXEC_ENDPOINT: DEFAULT_THINGINO_EXEC_ENDPOINT,
+        CONF_THINGINO_EXTRAS_JSON: "",
     }
 
     hass.config_entries.async_update_entry(entry, options=options)

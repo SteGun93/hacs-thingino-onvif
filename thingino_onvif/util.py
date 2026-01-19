@@ -90,3 +90,33 @@ def is_auth_error(error: Exception) -> bool:
         )
         or "auth" in stringify_onvif_error(error).lower()
     )
+
+
+def normalize_thingino_label(value: str) -> str:
+    """Normalize Thingino labels for matching."""
+    return value.strip().lower().replace("_", " ").replace("-", " ")
+
+
+def thingino_icon_for_label(label: str) -> str | None:
+    """Map Thingino labels to Home Assistant icons."""
+    normalized = normalize_thingino_label(label)
+    if "ircut" in normalized or "ir cut" in normalized:
+        return "mdi:camera-iris"
+    if "irled" in normalized or "ir led" in normalized:
+        return "mdi:led-on"
+    if "color" in normalized:
+        return "mdi:palette"
+    return None
+
+
+def format_thingino_label(label: str) -> str:
+    """Format Thingino labels into a friendly display name."""
+    normalized = normalize_thingino_label(label)
+    if not normalized:
+        return label
+    if normalized in ("irled", "ir led"):
+        return "IR LED"
+    if normalized in ("ircut", "ir cut"):
+        return "IR Cut"
+    parts = [part for part in normalized.split(" ") if part]
+    return " ".join(part.title() for part in parts)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
@@ -14,6 +15,18 @@ from .const import DOMAIN
 from .device import ONVIFDevice
 
 REDACT_CONFIG = {CONF_HOST, CONF_PASSWORD, CONF_USERNAME}
+
+
+def _redact_url(value: str | None) -> str | None:
+    if not value or "://" not in value:
+        return value
+    parts = urlsplit(value)
+    if not parts.username and not parts.password:
+        return value
+    hostname = parts.hostname or ""
+    if parts.port:
+        hostname = f"{hostname}:{parts.port}"
+    return urlunsplit((parts.scheme, hostname, parts.path, parts.query, parts.fragment))
 
 
 async def async_get_config_entry_diagnostics(
@@ -32,6 +45,15 @@ async def async_get_config_entry_diagnostics(
             "service_endpoint": device.ptz_service_available,
             "runtime_probe": device.ptz_supported_runtime,
             "tolerant_mode": device.ptz_fallback,
+        },
+        "thingino_extras": {
+            "enabled": device.thingino_extras_enabled,
+            "source": device.thingino_extras_source,
+            "endpoint": _redact_url(device.thingino_extras_endpoint),
+            "exec_endpoint": _redact_url(device.thingino_exec_endpoint),
+            "aux": [command.name for command in device.thingino_aux_commands],
+            "aux_toggles": [toggle.name for toggle in device.thingino_aux_toggles],
+            "relays": [relay.name for relay in device.thingino_relays],
         },
         "profiles": [asdict(profile) for profile in device.profiles],
         "services": {

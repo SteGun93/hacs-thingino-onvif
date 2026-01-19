@@ -82,8 +82,18 @@
         "data": {
           "enable_webhooks": "Enable webhooks",
           "extra_arguments": "Extra FFmpeg arguments",
+          "thingino_extras_enabled": "Enable Thingino extras",
+          "thingino_extras_endpoint": "Thingino extras endpoint",
+          "thingino_exec_endpoint": "Thingino exec endpoint",
+          "thingino_extras_json": "Thingino extras JSON (manual)",
           "rtsp_transport": "RTSP transport mechanism",
           "use_wallclock_as_timestamps": "Use wall clock as timestamps"
+        },
+        "data_description": {
+          "thingino_extras_enabled": "Discover Thingino-specific relays and auxiliary commands.",
+          "thingino_extras_endpoint": "Optional HTTP path or URL to expose onvif.json. Leave empty to auto-discover common paths.",
+          "thingino_exec_endpoint": "HTTP path or URL used to execute Thingino commands. Supports {cmd} placeholder.",
+          "thingino_extras_json": "Manual JSON payload to use when no endpoint is available."
         },
         "title": "ONVIF device options"
       }

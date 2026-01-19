@@ -5,10 +5,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import slugify
 
 from .const import DOMAIN
 from .device import ONVIFDevice
 from .entity import ONVIFBaseEntity
+from .models import ThinginoAuxCommand
 
 
 async def async_setup_entry(
@@ -24,6 +26,9 @@ async def async_setup_entry(
     ]
     if device.capabilities.ptz:
         entities += [GotoHomeButton(device), SetHomeButton(device)]
+    entities += [
+        ThinginoAuxButton(device, command) for command in device.thingino_aux_commands
+    ]
     async_add_entities(entities)
 
 
@@ -89,3 +94,20 @@ class SetHomeButton(ONVIFBaseEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Send out a SetHomePosition command."""
         await self.device.async_set_home(self.device.profiles[0])
+
+
+class ThinginoAuxButton(ONVIFBaseEntity, ButtonEntity):
+    """Defines a Thingino auxiliary command button."""
+
+    def __init__(self, device: ONVIFDevice, command: ThinginoAuxCommand) -> None:
+        """Initialize the button entity."""
+        super().__init__(device)
+        self.command = command
+        slug = slugify(command.name)
+        self._attr_name = command.name
+        self._attr_unique_id = f"{self.mac_or_serial}_thingino_aux_{slug}"
+        self._attr_icon = command.icon
+
+    async def async_press(self) -> None:
+        """Execute the command."""
+        await self.device.async_thingino_exec(self.command.exec)

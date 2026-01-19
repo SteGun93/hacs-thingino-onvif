@@ -10,11 +10,12 @@ from homeassistant.components.switch import SwitchEntity, SwitchEntityDescriptio
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import slugify
 
 from .const import DOMAIN
 from .device import ONVIFDevice
 from .entity import ONVIFBaseEntity
-from .models import Profile
+from .models import Profile, ThinginoRelay, ThinginoToggle
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -70,12 +71,18 @@ async def async_setup_entry(
 ) -> None:
     """Set up a ONVIF switch platform."""
     device = hass.data[DOMAIN][config_entry.unique_id]
-
-    async_add_entities(
+    entities: list[SwitchEntity] = [
         ONVIFSwitch(device, description)
         for description in SWITCHES
         if description.supported_fn(device)
-    )
+    ]
+    entities += [
+        ThinginoRelaySwitch(device, relay) for relay in device.thingino_relays
+    ]
+    entities += [
+        ThinginoAuxToggleSwitch(device, toggle) for toggle in device.thingino_aux_toggles
+    ]
+    async_add_entities(entities)
 
 
 class ONVIFSwitch(ONVIFBaseEntity, SwitchEntity):
@@ -107,3 +114,70 @@ class ONVIFSwitch(ONVIFBaseEntity, SwitchEntity):
         await self.entity_description.turn_off_fn(self.device)(
             profile, self.entity_description.turn_off_data
         )
+
+
+class ThinginoRelaySwitch(ONVIFBaseEntity, SwitchEntity):
+    """Switch for a Thingino relay."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, device: ONVIFDevice, relay: ThinginoRelay) -> None:
+        """Initialize the relay switch."""
+        super().__init__(device)
+        self.relay = relay
+        self._attr_unique_id = f"{self.mac_or_serial}_thingino_relay_{relay.index}"
+        self._attr_name = relay.name
+        self._attr_icon = relay.icon
+        self._attr_is_on = self._idle_state_to_bool(relay.idle_state)
+
+    @staticmethod
+    def _idle_state_to_bool(state: str | None) -> bool | None:
+        if not state:
+            return None
+        normalized = state.strip().lower()
+        if normalized in ("open", "opened", "on", "true", "1"):
+            return True
+        if normalized in ("close", "closed", "off", "false", "0"):
+            return False
+        return None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Open the relay."""
+        if self.relay.via_onvif and self.relay.token:
+            await self.device.async_set_relay_output_state(self.relay.token, True)
+        elif self.relay.open:
+            await self.device.async_thingino_exec(self.relay.open)
+        self._attr_is_on = True
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Close the relay."""
+        if self.relay.via_onvif and self.relay.token:
+            await self.device.async_set_relay_output_state(self.relay.token, False)
+        elif self.relay.close:
+            await self.device.async_thingino_exec(self.relay.close)
+        self._attr_is_on = False
+
+
+class ThinginoAuxToggleSwitch(ONVIFBaseEntity, SwitchEntity):
+    """Switch for a Thingino auxiliary toggle."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, device: ONVIFDevice, toggle: ThinginoToggle) -> None:
+        """Initialize the aux toggle switch."""
+        super().__init__(device)
+        self.toggle = toggle
+        slug = slugify(toggle.name)
+        self._attr_unique_id = f"{self.mac_or_serial}_thingino_aux_{slug}"
+        self._attr_name = toggle.name
+        self._attr_icon = toggle.icon
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Execute the ON command."""
+        await self.device.async_thingino_exec(self.toggle.on_exec)
+        self._attr_is_on = True
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Execute the OFF command."""
+        await self.device.async_thingino_exec(self.toggle.off_exec)
+        self._attr_is_on = False

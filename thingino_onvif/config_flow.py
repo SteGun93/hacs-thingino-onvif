@@ -45,9 +45,15 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_ENABLE_WEBHOOKS,
     CONF_HARDWARE,
+    CONF_THINGINO_EXTRAS_ENABLED,
+    CONF_THINGINO_EXTRAS_ENDPOINT,
+    CONF_THINGINO_EXTRAS_JSON,
+    CONF_THINGINO_EXEC_ENDPOINT,
     DEFAULT_ARGUMENTS,
     DEFAULT_ENABLE_WEBHOOKS,
     DEFAULT_PORT,
+    DEFAULT_THINGINO_EXTRAS_ENABLED,
+    DEFAULT_THINGINO_EXEC_ENDPOINT,
     DOMAIN,
     GET_CAPABILITIES_EXCEPTIONS,
     LOGGER,
@@ -421,6 +427,26 @@ class OnvifOptionsFlowHandler(OptionsFlow):
                     CONF_ENABLE_WEBHOOKS, DEFAULT_ENABLE_WEBHOOKS
                 ),
             )
+            self.options[CONF_THINGINO_EXTRAS_ENABLED] = user_input.get(
+                CONF_THINGINO_EXTRAS_ENABLED,
+                self.config_entry.options.get(
+                    CONF_THINGINO_EXTRAS_ENABLED, DEFAULT_THINGINO_EXTRAS_ENABLED
+                ),
+            )
+            self.options[CONF_THINGINO_EXTRAS_ENDPOINT] = user_input.get(
+                CONF_THINGINO_EXTRAS_ENDPOINT,
+                self.config_entry.options.get(CONF_THINGINO_EXTRAS_ENDPOINT, ""),
+            )
+            self.options[CONF_THINGINO_EXEC_ENDPOINT] = user_input.get(
+                CONF_THINGINO_EXEC_ENDPOINT,
+                self.config_entry.options.get(
+                    CONF_THINGINO_EXEC_ENDPOINT, DEFAULT_THINGINO_EXEC_ENDPOINT
+                ),
+            )
+            self.options[CONF_THINGINO_EXTRAS_JSON] = user_input.get(
+                CONF_THINGINO_EXTRAS_JSON,
+                self.config_entry.options.get(CONF_THINGINO_EXTRAS_JSON, ""),
+            )
             return self.async_create_entry(title="", data=self.options)
 
         advanced_options = {}
@@ -455,6 +481,32 @@ class OnvifOptionsFlowHandler(OptionsFlow):
                             CONF_ENABLE_WEBHOOKS, DEFAULT_ENABLE_WEBHOOKS
                         ),
                     ): bool,
+                    vol.Optional(
+                        CONF_THINGINO_EXTRAS_ENABLED,
+                        default=self.config_entry.options.get(
+                            CONF_THINGINO_EXTRAS_ENABLED,
+                            DEFAULT_THINGINO_EXTRAS_ENABLED,
+                        ),
+                    ): bool,
+                    vol.Optional(
+                        CONF_THINGINO_EXTRAS_ENDPOINT,
+                        default=self.config_entry.options.get(
+                            CONF_THINGINO_EXTRAS_ENDPOINT, ""
+                        ),
+                    ): str,
+                    vol.Optional(
+                        CONF_THINGINO_EXEC_ENDPOINT,
+                        default=self.config_entry.options.get(
+                            CONF_THINGINO_EXEC_ENDPOINT,
+                            DEFAULT_THINGINO_EXEC_ENDPOINT,
+                        ),
+                    ): str,
+                    vol.Optional(
+                        CONF_THINGINO_EXTRAS_JSON,
+                        default=self.config_entry.options.get(
+                            CONF_THINGINO_EXTRAS_JSON, ""
+                        ),
+                    ): str,
                     **advanced_options,
                 }
             ),

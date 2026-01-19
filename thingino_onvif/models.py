@@ -82,6 +82,39 @@ class Event:
     entity_enabled: bool = True
 
 
+@dataclass
+class ThinginoAuxCommand:
+    """Represents a Thingino auxiliary command."""
+
+    name: str
+    exec: str
+    icon: str | None = None
+
+
+@dataclass
+class ThinginoRelay:
+    """Represents a Thingino relay command pair."""
+
+    index: int
+    name: str
+    open: str | None
+    close: str | None
+    idle_state: str | None = None
+    icon: str | None = None
+    token: str | None = None
+    via_onvif: bool = False
+
+
+@dataclass
+class ThinginoToggle:
+    """Represents a Thingino toggle command pair."""
+
+    name: str
+    on_exec: str
+    off_exec: str
+    icon: str | None = None
+
+
 class PullPointManagerState(Enum):
     """States for the pullpoint manager."""
 

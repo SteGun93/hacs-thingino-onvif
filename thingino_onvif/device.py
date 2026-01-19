@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 import datetime as dt
+import json
 import os
 import time
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 import onvif
@@ -25,13 +27,21 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
 from .const import (
     ABSOLUTE_MOVE,
     CONF_ENABLE_WEBHOOKS,
+    CONF_THINGINO_EXTRAS_ENABLED,
+    CONF_THINGINO_EXTRAS_ENDPOINT,
+    CONF_THINGINO_EXTRAS_JSON,
+    CONF_THINGINO_EXEC_ENDPOINT,
     CONTINUOUS_MOVE,
     DEFAULT_ENABLE_WEBHOOKS,
+    DEFAULT_THINGINO_EXTRAS_ENABLED,
+    DEFAULT_THINGINO_EXTRAS_ENDPOINTS,
+    DEFAULT_THINGINO_EXEC_ENDPOINT,
     GET_CAPABILITIES_EXCEPTIONS,
     GOTOPRESET_MOVE,
     LOGGER,
@@ -42,7 +52,18 @@ from .const import (
     ZOOM_FACTOR,
 )
 from .event import EventManager
-from .models import PTZ, Capabilities, DeviceInfo, Profile, Resolution, Video
+from .models import (
+    PTZ,
+    Capabilities,
+    DeviceInfo,
+    Profile,
+    Resolution,
+    ThinginoAuxCommand,
+    ThinginoRelay,
+    ThinginoToggle,
+    Video,
+)
+from .util import format_thingino_label, normalize_thingino_label, thingino_icon_for_label
 
 
 class ONVIFDevice:
@@ -70,6 +91,13 @@ class ONVIFDevice:
         self.ptz_reported: bool = False
         self.ptz_supported_runtime: bool = False
         self.ptz_fallback: bool = False
+        self.thingino_extras_enabled: bool = False
+        self.thingino_extras_source: str | None = None
+        self.thingino_extras_endpoint: str | None = None
+        self.thingino_exec_endpoint: str | None = None
+        self.thingino_aux_commands: list[ThinginoAuxCommand] = []
+        self.thingino_aux_toggles: list[ThinginoToggle] = []
+        self.thingino_relays: list[ThinginoRelay] = []
 
     async def _async_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry
@@ -148,6 +176,8 @@ class ONVIFDevice:
         # No camera profiles to add
         if not self.profiles:
             raise ONVIFError("No camera profiles found")
+
+        await self.async_discover_thingino_extras()
 
         if self.capabilities.ptz:
             LOGGER.debug("%s: creating PTZ service", self.name)
@@ -871,6 +901,335 @@ class ONVIFDevice:
             profile.ptz = PTZ(True, True, True, presets=tokens)
         else:
             profile.ptz.presets = tokens
+
+    async def async_discover_thingino_extras(self) -> None:
+        """Discover Thingino extras from ONVIF or HTTP endpoints."""
+        options = self.config_entry.options
+        self.thingino_extras_enabled = options.get(
+            CONF_THINGINO_EXTRAS_ENABLED, DEFAULT_THINGINO_EXTRAS_ENABLED
+        )
+        if not self.thingino_extras_enabled:
+            LOGGER.debug("%s: Thingino extras disabled", self.name)
+            return
+
+        onvif_relays = await self._async_discover_onvif_relays()
+        if onvif_relays:
+            self.thingino_relays = onvif_relays
+            self.thingino_extras_source = "onvif"
+
+        self.thingino_extras_endpoint = options.get(CONF_THINGINO_EXTRAS_ENDPOINT)
+        if self.thingino_extras_endpoint == "":
+            self.thingino_extras_endpoint = None
+        self.thingino_exec_endpoint = options.get(
+            CONF_THINGINO_EXEC_ENDPOINT, DEFAULT_THINGINO_EXEC_ENDPOINT
+        )
+        if self.thingino_exec_endpoint == "":
+            self.thingino_exec_endpoint = None
+
+        payload: dict[str, Any] | None = None
+        endpoint_used: str | None = None
+        if self.thingino_extras_endpoint:
+            payload = await self._async_fetch_thingino_json(self.thingino_extras_endpoint)
+            endpoint_used = self.thingino_extras_endpoint if payload else None
+        else:
+            for candidate in DEFAULT_THINGINO_EXTRAS_ENDPOINTS:
+                payload = await self._async_fetch_thingino_json(candidate)
+                if payload is not None:
+                    endpoint_used = candidate
+                    break
+
+        if payload is None:
+            manual_json = options.get(CONF_THINGINO_EXTRAS_JSON)
+            if manual_json:
+                try:
+                    payload = json.loads(manual_json)
+                    self.thingino_extras_source = "manual"
+                    LOGGER.debug("%s: Thingino extras loaded from manual JSON", self.name)
+                except json.JSONDecodeError as err:
+                    LOGGER.warning(
+                        "%s: Failed to parse Thingino extras JSON: %s", self.name, err
+                    )
+
+        if payload is None:
+            LOGGER.debug("%s: Thingino extras not detected", self.name)
+            return
+
+        if self.thingino_extras_source is None:
+            self.thingino_extras_source = "http"
+        if endpoint_used:
+            self.thingino_extras_endpoint = endpoint_used
+
+        self._parse_thingino_extras(payload)
+
+    async def _async_discover_onvif_relays(self) -> list[ThinginoRelay]:
+        """Discover relay outputs via ONVIF DeviceIO."""
+        try:
+            deviceio = await self.device.create_deviceio_service()
+            outputs = await deviceio.GetRelayOutputs()
+        except GET_CAPABILITIES_EXCEPTIONS:
+            return []
+
+        if not isinstance(outputs, list):
+            return []
+
+        relays: list[ThinginoRelay] = []
+        for index, output in enumerate(outputs):
+            token = getattr(output, "token", None) or getattr(output, "Token", None)
+            name = format_thingino_label(str(token)) if token else f"Relay {index + 1}"
+            idle_state = None
+            properties = getattr(output, "Properties", None)
+            if properties and getattr(properties, "IdleState", None):
+                idle_state = str(properties.IdleState)
+            relays.append(
+                ThinginoRelay(
+                    index=index,
+                    name=name,
+                    open=None,
+                    close=None,
+                    idle_state=idle_state,
+                    icon=thingino_icon_for_label(name),
+                    token=str(token) if token else None,
+                    via_onvif=True,
+                )
+            )
+        if relays:
+            LOGGER.debug("%s: ONVIF relay outputs discovered: %s", self.name, relays)
+        return relays
+
+    async def _async_fetch_thingino_json(self, endpoint: str) -> dict[str, Any] | None:
+        """Fetch Thingino onvif.json payload from an endpoint."""
+        url = self._build_thingino_url(endpoint)
+        session = async_get_clientsession(self.hass)
+        auth = aiohttp.BasicAuth(self.username, self.password) if self.username else None
+        try:
+            async with session.get(
+                url,
+                auth=auth,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as response:
+                if response.status != 200:
+                    LOGGER.debug(
+                        "%s: Thingino extras endpoint %s returned %s",
+                        self.name,
+                        url,
+                        response.status,
+                    )
+                    return None
+                try:
+                    data = await response.json(content_type=None)
+                except (aiohttp.ContentTypeError, json.JSONDecodeError):
+                    text = await response.text()
+                    LOGGER.debug(
+                        "%s: Thingino extras endpoint %s returned non-JSON payload: %s",
+                        self.name,
+                        url,
+                        text,
+                    )
+                    return None
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            LOGGER.debug(
+                "%s: Failed to fetch Thingino extras from %s: %s",
+                self.name,
+                url,
+                err,
+            )
+            return None
+
+        if not isinstance(data, dict):
+            LOGGER.debug(
+                "%s: Thingino extras payload from %s is not a JSON object",
+                self.name,
+                url,
+            )
+            return None
+        LOGGER.debug("%s: Thingino extras discovered at %s", self.name, url)
+        return data
+
+    def _build_thingino_url(self, endpoint: str) -> str:
+        """Build a full URL for a Thingino endpoint."""
+        if endpoint.startswith("http://") or endpoint.startswith("https://"):
+            return endpoint
+        if not endpoint.startswith("/"):
+            endpoint = f"/{endpoint}"
+        return f"http://{self.host}:{self.port}{endpoint}"
+
+    def _parse_thingino_extras(self, payload: dict[str, Any]) -> None:
+        """Parse Thingino extras payload."""
+        aux_commands: list[ThinginoAuxCommand] = []
+        relays: list[ThinginoRelay] = []
+
+        for item in payload.get("aux") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            exec_cmd = str(item.get("exec") or "").strip()
+            if not name or not exec_cmd:
+                continue
+            aux_commands.append(
+                ThinginoAuxCommand(
+                    name=format_thingino_label(name),
+                    exec=exec_cmd,
+                    icon=thingino_icon_for_label(name),
+                )
+            )
+
+        for index, item in enumerate(payload.get("relays") or []):
+            if not isinstance(item, dict):
+                continue
+            open_cmd = str(item.get("open") or "").strip()
+            close_cmd = str(item.get("close") or "").strip()
+            if not open_cmd or not close_cmd:
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                name = self._derive_thingino_relay_name(open_cmd, close_cmd, index)
+            relays.append(
+                ThinginoRelay(
+                    index=index,
+                    name=format_thingino_label(name),
+                    open=open_cmd,
+                    close=close_cmd,
+                    idle_state=str(item.get("idle_state") or "").strip() or None,
+                    icon=thingino_icon_for_label(name),
+                )
+            )
+
+        toggles, remaining = self._build_thingino_aux_toggles(aux_commands)
+        self.thingino_aux_toggles = toggles
+        self.thingino_aux_commands = remaining
+        if relays:
+            self.thingino_relays = relays
+
+        LOGGER.debug(
+            "%s: Thingino extras parsed (aux=%s, toggles=%s, relays=%s, source=%s, endpoint=%s)",
+            self.name,
+            len(self.thingino_aux_commands),
+            len(self.thingino_aux_toggles),
+            len(self.thingino_relays),
+            self.thingino_extras_source,
+            self.thingino_extras_endpoint,
+        )
+
+    def _build_thingino_aux_toggles(
+        self, commands: list[ThinginoAuxCommand]
+    ) -> tuple[list[ThinginoToggle], list[ThinginoAuxCommand]]:
+        """Create toggle pairs from aux commands when possible."""
+        pairs: dict[str, dict[str, ThinginoAuxCommand]] = {}
+        for command in commands:
+            base, state = self._split_thingino_toggle_name(command.name)
+            if not base or not state:
+                continue
+            pairs.setdefault(base, {})[state] = command
+
+        toggles: list[ThinginoToggle] = []
+        used_exec: set[str] = set()
+        for base, entries in pairs.items():
+            if "on" in entries and "off" in entries:
+                toggles.append(
+                    ThinginoToggle(
+                        name=format_thingino_label(base),
+                        on_exec=entries["on"].exec,
+                        off_exec=entries["off"].exec,
+                        icon=thingino_icon_for_label(base),
+                    )
+                )
+                used_exec.add(entries["on"].exec)
+                used_exec.add(entries["off"].exec)
+
+        remaining = [cmd for cmd in commands if cmd.exec not in used_exec]
+        return toggles, remaining
+
+    def _split_thingino_toggle_name(self, name: str) -> tuple[str | None, str | None]:
+        """Split a toggle name into base and state."""
+        normalized = normalize_thingino_label(name)
+        parts = [part for part in normalized.split(" ") if part]
+        if len(parts) < 2:
+            return None, None
+        state = parts[-1]
+        if state not in ("on", "off"):
+            return None, None
+        base = " ".join(parts[:-1]).strip()
+        if not base:
+            return None, None
+        return base, state
+
+    def _derive_thingino_relay_name(
+        self, open_cmd: str, close_cmd: str, index: int
+    ) -> str:
+        """Derive a relay name from command strings."""
+        for cmd in (open_cmd, close_cmd):
+            cmd = cmd.strip()
+            if cmd:
+                return cmd.split(" ")[0]
+        return f"Relay {index + 1}"
+
+    async def async_set_relay_output_state(
+        self, token: str, state: bool
+    ) -> None:
+        """Set ONVIF relay output state."""
+        try:
+            deviceio = await self.device.create_deviceio_service()
+            req = deviceio.create_type("SetRelayOutputState")
+            req.RelayOutputToken = token
+            req.LogicalState = "active" if state else "inactive"
+            await deviceio.SetRelayOutputState(req)
+        except GET_CAPABILITIES_EXCEPTIONS as err:
+            LOGGER.warning(
+                "%s: Failed to set relay output %s: %s", self.name, token, err
+            )
+
+    async def async_thingino_exec(self, cmd: str) -> None:
+        """Execute a Thingino command via HTTP."""
+        if not cmd:
+            return
+        if not self.thingino_exec_endpoint:
+            LOGGER.warning(
+                "%s: Thingino exec endpoint not configured; cannot run '%s'",
+                self.name,
+                cmd,
+            )
+            return
+
+        endpoint = self.thingino_exec_endpoint
+        if "{cmd}" in endpoint:
+            url = self._build_thingino_url(endpoint.format(cmd=quote(cmd)))
+            method = "get"
+            json_payload = None
+        else:
+            url = self._build_thingino_url(endpoint)
+            method = "post"
+            json_payload = {"cmd": cmd, "exec": cmd}
+
+        safe_url = url
+        if "://" in url and "@" in url:
+            scheme, rest = url.split("://", 1)
+            safe_url = f"{scheme}://{rest.split('@', 1)[1]}"
+        LOGGER.debug("%s: Thingino exec '%s' via %s", self.name, cmd, safe_url)
+
+        session = async_get_clientsession(self.hass)
+        auth = aiohttp.BasicAuth(self.username, self.password) if self.username else None
+        try:
+            async with session.request(
+                method,
+                url,
+                json=json_payload,
+                auth=auth,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as response:
+                if response.status >= 400:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "%s: Thingino exec failed (%s) for '%s': %s",
+                        self.name,
+                        response.status,
+                        cmd,
+                        body,
+                    )
+                    return
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            LOGGER.warning(
+                "%s: Thingino exec request failed for '%s': %s", self.name, cmd, err
+            )
 
     async def async_run_aux_command(
         self,
