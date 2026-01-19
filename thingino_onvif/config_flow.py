@@ -66,6 +66,7 @@ from .device import get_device
 from .thingino_http import async_fetch_thingino_onvif_json
 
 CONF_MANUAL_INPUT = "Manually configure ONVIF device"
+CONF_SELECTED_DEVICES = "devices"
 
 
 def wsdiscovery() -> list[Service]:
@@ -136,6 +137,8 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
         self.onvif_config: dict[str, Any] = {}
         self.thingino_http_username: str | None = None
         self.thingino_http_password: str | None = None
+        self._selected_devices: list[dict[str, Any]] = []
+        self._discovered_devices: dict[str, dict[str, Any]] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -223,44 +226,61 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
         Let user choose between discovered devices and manual configuration.
         If no device is found allow user to manually input configuration.
         """
+        errors: dict[str, str] = {}
         if user_input:
-            if user_input[CONF_HOST] == CONF_MANUAL_INPUT:
-                return await self.async_step_configure()
-
-            for device in self.devices:
-                if device[CONF_HOST] == user_input[CONF_HOST]:
-                    self.device_id = device[CONF_DEVICE_ID]
-                    self.onvif_config = {
-                        CONF_NAME: device[CONF_NAME],
-                        CONF_HOST: device[CONF_HOST],
-                        CONF_PORT: device[CONF_PORT],
-                    }
-                    return await self.async_step_configure()
+            selection = user_input.get(CONF_SELECTED_DEVICES) or []
+            if not selection:
+                errors["base"] = "no_selection"
+            else:
+                self._selected_devices = [
+                    self._discovered_devices[key]
+                    for key in selection
+                    if key in self._discovered_devices
+                ]
+                LOGGER.debug(
+                    "Thingino bulk selection: %s",
+                    [
+                        f"{device[CONF_NAME]} ({device[CONF_HOST]})"
+                        for device in self._selected_devices
+                    ],
+                )
+                return await self.async_step_thingino_http_auth_bulk()
 
         discovery = await async_discovery(self.hass)
+        self._discovered_devices = {}
         for device in discovery:
+            device_id = device.get(CONF_DEVICE_ID)
+            key = device_id or f"{device[CONF_HOST]}:{device[CONF_PORT]}"
             configured = any(
-                entry.unique_id == device[CONF_DEVICE_ID]
+                entry.unique_id == device_id
                 for entry in self._async_current_entries()
+                if device_id
             )
-
-            if not configured:
-                self.devices.append(device)
+            if configured:
+                continue
+            self._discovered_devices[key] = device
 
         if LOGGER.isEnabledFor(logging.DEBUG):
-            LOGGER.debug("Discovered ONVIF devices %s", pformat(self.devices))
+            LOGGER.debug(
+                "Discovered Thingino/ONVIF devices (%s): %s",
+                len(self._discovered_devices),
+                pformat(list(self._discovered_devices.values())),
+            )
 
-        if self.devices:
-            devices = {CONF_MANUAL_INPUT: CONF_MANUAL_INPUT}
-            for device in self.devices:
+        if self._discovered_devices:
+            devices = {}
+            for key, device in self._discovered_devices.items():
                 description = f"{device[CONF_NAME]} ({device[CONF_HOST]})"
                 if hardware := device[CONF_HARDWARE]:
                     description += f" [{hardware}]"
-                devices[device[CONF_HOST]] = description
+                devices[key] = description
 
             return self.async_show_form(
                 step_id="device",
-                data_schema=vol.Schema({vol.Optional(CONF_HOST): vol.In(devices)}),
+                data_schema=vol.Schema(
+                    {vol.Required(CONF_SELECTED_DEVICES): vol.MultiSelect(devices)}
+                ),
+                errors=errors,
             )
 
         LOGGER.debug("WS-Discovery found no ONVIF devices; using manual host if provided")
@@ -312,6 +332,128 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders=description_placeholders,
         )
+
+    async def async_step_thingino_http_auth_bulk(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle bulk Thingino HTTP authentication."""
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] | None = None
+        if user_input:
+            self.thingino_http_username = user_input[CONF_THINGINO_HTTP_USERNAME]
+            self.thingino_http_password = user_input[CONF_THINGINO_HTTP_PASSWORD]
+            primary = self._selected_devices[0]
+            payload, status = await async_fetch_thingino_onvif_json(
+                self.hass,
+                primary[CONF_HOST],
+                primary[CONF_PORT],
+                DEFAULT_THINGINO_INFO_ENDPOINT,
+                self.thingino_http_username,
+                self.thingino_http_password,
+                retries=1,
+            )
+            LOGGER.debug(
+                "Thingino bulk HTTP probe status=%s for %s",
+                status,
+                primary[CONF_HOST],
+            )
+            if status == 401:
+                errors["base"] = "auth_failed"
+                description_placeholders = {"error": "Thingino HTTP"}
+            else:
+                if status and status != 200:
+                    LOGGER.debug(
+                        "Thingino bulk HTTP probe non-200 status=%s; continuing",
+                        status,
+                    )
+                if status == 200 and payload is not None:
+                    LOGGER.debug(
+                        "Thingino bulk HTTP probe succeeded for %s",
+                        primary[CONF_HOST],
+                    )
+                options = {
+                    CONF_THINGINO_HTTP_USERNAME: self.thingino_http_username,
+                    CONF_THINGINO_HTTP_PASSWORD: self.thingino_http_password,
+                }
+                await self._async_create_bulk_entries(options)
+                first = self._selected_devices[0]
+                self.device_id = first.get(CONF_DEVICE_ID) or f"{first[CONF_HOST]}:{first[CONF_PORT]}"
+                await self.async_set_unique_id(self.device_id, raise_on_progress=False)
+                self._abort_if_unique_id_configured(
+                    updates={
+                        CONF_HOST: first[CONF_HOST],
+                        CONF_PORT: first[CONF_PORT],
+                        CONF_NAME: first[CONF_NAME],
+                        CONF_USERNAME: "",
+                        CONF_PASSWORD: "",
+                    }
+                )
+                title = f"{first[CONF_NAME]} - {self.device_id}"
+                return self.async_create_entry(
+                    title=title,
+                    data={
+                        CONF_NAME: first[CONF_NAME],
+                        CONF_HOST: first[CONF_HOST],
+                        CONF_PORT: first[CONF_PORT],
+                        CONF_USERNAME: "",
+                        CONF_PASSWORD: "",
+                    },
+                    options=options,
+                )
+
+        return self.async_show_form(
+            step_id="thingino_http_auth_bulk",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_THINGINO_HTTP_USERNAME, default="root"): str,
+                    vol.Required(CONF_THINGINO_HTTP_PASSWORD): str,
+                }
+            ),
+            errors=errors,
+            description_placeholders=description_placeholders,
+        )
+
+    async def _async_create_bulk_entries(self, options: dict[str, Any]) -> None:
+        """Start flows for remaining selected devices."""
+        if len(self._selected_devices) < 2:
+            return
+        # HA allows only a single entry per flow, so we spawn additional flows here.
+        for device in self._selected_devices[1:]:
+            device_id = device.get(CONF_DEVICE_ID) or f"{device[CONF_HOST]}:{device[CONF_PORT]}"
+            data = {
+                CONF_DEVICE_ID: device_id,
+                CONF_NAME: device[CONF_NAME],
+                CONF_HOST: device[CONF_HOST],
+                CONF_PORT: device[CONF_PORT],
+                CONF_USERNAME: "",
+                CONF_PASSWORD: "",
+                "options": options,
+            }
+            self.hass.async_create_task(
+                self.hass.config_entries.flow.async_init(
+                    DOMAIN, context={"source": "import"}, data=data
+                )
+            )
+
+    async def async_step_import(
+        self, user_input: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Handle import flow for bulk setup."""
+        options = user_input.pop("options", {})
+        device_id = user_input.pop(CONF_DEVICE_ID, None)
+        if device_id:
+            await self.async_set_unique_id(device_id, raise_on_progress=False)
+            self._abort_if_unique_id_configured(
+                updates={
+                    CONF_HOST: user_input[CONF_HOST],
+                    CONF_PORT: user_input[CONF_PORT],
+                    CONF_NAME: user_input[CONF_NAME],
+                    CONF_USERNAME: user_input.get(CONF_USERNAME, ""),
+                    CONF_PASSWORD: user_input.get(CONF_PASSWORD, ""),
+                }
+            )
+        title = f"{user_input[CONF_NAME]} - {device_id or user_input[CONF_HOST]}"
+        return self.async_create_entry(title=title, data=user_input, options=options)
 
     async def async_step_thingino_http_auth(
         self, user_input: dict[str, Any] | None = None

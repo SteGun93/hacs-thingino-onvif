@@ -11,6 +11,7 @@
     "error": {
       "auth_failed": "Could not authenticate: {error}",
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "no_selection": "Please select at least one device.",
       "no_onvif_service": "No ONVIF service found. Check that the port number is correct.",
       "onvif_error": "Error setting up ONVIF device: {error}. Check logs for more information."
     },
@@ -37,9 +38,10 @@
       },
       "device": {
         "data": {
-          "host": "Select discovered ONVIF device"
+          "devices": "Select discovered Thingino cameras"
         },
-        "title": "Select ONVIF device"
+        "description": "Folgende Thingino-Kameras wurden gefunden:",
+        "title": "Select Thingino cameras"
       },
       "reauth_confirm": {
         "data": {
@@ -55,6 +57,14 @@
           "thingino_http_username": "Thingino UI username"
         },
         "description": "The Thingino web UI requires separate HTTP authentication to read onvif.json.",
+        "title": "Thingino HTTP Authentication"
+      },
+      "thingino_http_auth_bulk": {
+        "data": {
+          "thingino_http_password": "Thingino UI password",
+          "thingino_http_username": "Thingino UI username"
+        },
+        "description": "Geben Sie nun Username/Passwort für das Frontend der gewählten Kameras ein:",
         "title": "Thingino HTTP Authentication"
       },
       "user": {
