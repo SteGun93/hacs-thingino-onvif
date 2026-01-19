@@ -66,6 +66,10 @@ class ONVIFDevice:
         self.platforms: list[Platform] = []
 
         self._dt_diff_seconds: float = 0
+        self.ptz_service_available: bool = False
+        self.ptz_reported: bool = False
+        self.ptz_supported_runtime: bool = False
+        self.ptz_fallback: bool = False
 
     async def _async_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry
@@ -147,7 +151,39 @@ class ONVIFDevice:
 
         if self.capabilities.ptz:
             LOGGER.debug("%s: creating PTZ service", self.name)
-            await self.device.create_ptz_service()
+            try:
+                await self.device.create_ptz_service()
+                self.ptz_service_available = True
+                if (
+                    self.ptz_service_available
+                    and not self.ptz_reported
+                    and not self.ptz_fallback
+                ):
+                    # Thingino cameras may omit PTZ capabilities even when the PTZ service works.
+                    self.ptz_fallback = True
+                    LOGGER.debug(
+                        "%s: PTZ service endpoint detected without reported capabilities; enabling tolerant PTZ mode",
+                        self.name,
+                    )
+            except GET_CAPABILITIES_EXCEPTIONS as err:
+                LOGGER.warning("%s: Failed to create PTZ service: %s", self.name, err)
+            self.ptz_supported_runtime = await self.async_probe_ptz_support()
+            if self.ptz_supported_runtime:
+                LOGGER.debug(
+                    "%s: PTZ runtime probe succeeded (tolerant mode=%s)",
+                    self.name,
+                    self.ptz_fallback,
+                )
+            elif self.ptz_service_available:
+                LOGGER.debug(
+                    "%s: PTZ runtime probe failed; keeping PTZ enabled based on service endpoint",
+                    self.name,
+                )
+            else:
+                LOGGER.debug(
+                    "%s: PTZ runtime probe skipped; keeping PTZ enabled based on reported capabilities",
+                    self.name,
+                )
 
         # Determine max resolution from profiles
         self.max_resolution = max(
@@ -378,7 +414,21 @@ class ONVIFDevice:
         ptz = False
         with suppress(*GET_CAPABILITIES_EXCEPTIONS):
             self.device.get_definition("ptz")
+            self.ptz_reported = True
             ptz = True
+
+        with suppress(*GET_CAPABILITIES_EXCEPTIONS):
+            await self.device.create_ptz_service()
+            self.ptz_service_available = True
+            ptz = True
+
+        if self.ptz_service_available and not self.ptz_reported:
+            # Thingino cameras may omit PTZ capabilities even when the PTZ service works.
+            self.ptz_fallback = True
+            LOGGER.debug(
+                "%s: PTZ service endpoint detected without reported capabilities; enabling tolerant PTZ mode",
+                self.name,
+            )
 
         imaging = False
         with suppress(*GET_CAPABILITIES_EXCEPTIONS):
@@ -446,23 +496,43 @@ class ONVIFDevice:
             )
 
             # Configure PTZ options
-            if self.capabilities.ptz and onvif_profile.PTZConfiguration:
-                profile.ptz = PTZ(
-                    onvif_profile.PTZConfiguration.DefaultContinuousPanTiltVelocitySpace
-                    is not None,
-                    onvif_profile.PTZConfiguration.DefaultRelativePanTiltTranslationSpace
-                    is not None,
-                    onvif_profile.PTZConfiguration.DefaultAbsolutePantTiltPositionSpace
-                    is not None,
-                )
+            if self.capabilities.ptz:
+                if onvif_profile.PTZConfiguration:
+                    profile.ptz = PTZ(
+                        onvif_profile.PTZConfiguration.DefaultContinuousPanTiltVelocitySpace
+                        is not None,
+                        onvif_profile.PTZConfiguration.DefaultRelativePanTiltTranslationSpace
+                        is not None,
+                        onvif_profile.PTZConfiguration.DefaultAbsolutePantTiltPositionSpace
+                        is not None,
+                    )
+                else:
+                    profile.ptz = PTZ(True, True, True)
+                    LOGGER.debug(
+                        "%s: PTZ configuration missing for profile %s; enabling tolerant PTZ controls",
+                        self.name,
+                        profile.token,
+                    )
 
                 try:
                     ptz_service = await self.device.create_ptz_service()
                     presets = await ptz_service.GetPresets(profile.token)
                     profile.ptz.presets = [preset.token for preset in presets if preset]
-                except GET_CAPABILITIES_EXCEPTIONS:
+                    LOGGER.debug(
+                        "%s: PTZ presets for profile %s: %s",
+                        self.name,
+                        profile.token,
+                        profile.ptz.presets,
+                    )
+                except GET_CAPABILITIES_EXCEPTIONS as err:
                     # It's OK if Presets aren't supported
-                    profile.ptz.presets = []
+                    profile.ptz.presets = None
+                    LOGGER.debug(
+                        "%s: Could not fetch PTZ presets for profile %s: %s",
+                        self.name,
+                        profile.token,
+                        err,
+                    )
 
             # Configure Imaging options
             if self.capabilities.imaging and onvif_profile.VideoSourceConfiguration:
@@ -503,7 +573,16 @@ class ONVIFDevice:
             LOGGER.warning("PTZ actions are not supported on device '%s'", self.name)
             return
 
-        ptz_service = await self.device.create_ptz_service()
+        try:
+            ptz_service = await self.device.create_ptz_service()
+        except GET_CAPABILITIES_EXCEPTIONS as err:
+            LOGGER.warning(
+                "%s: Failed to create PTZ service for action %s: %s",
+                self.name,
+                move_mode,
+                err,
+            )
+            return
 
         pan_val = distance * PAN_FACTOR.get(pan, 0)
         tilt_val = distance * TILT_FACTOR.get(tilt, 0)
@@ -513,7 +592,7 @@ class ONVIFDevice:
         LOGGER.debug(
             (
                 "Calling %s PTZ | Pan = %4.2f | Tilt = %4.2f | Zoom = %4.2f | Speed ="
-                " %4.2f | Preset = %s"
+                " %s | Preset = %s"
             ),
             move_mode,
             pan_val,
@@ -527,11 +606,16 @@ class ONVIFDevice:
             req.ProfileToken = profile.token
             if move_mode == CONTINUOUS_MOVE:
                 # Guard against unsupported operation
-                if not profile.ptz or not profile.ptz.continuous:
+                if profile.ptz and not profile.ptz.continuous and not self.ptz_fallback:
                     LOGGER.warning(
                         "ContinuousMove not supported on device '%s'", self.name
                     )
                     return
+                if profile.ptz and not profile.ptz.continuous and self.ptz_fallback:
+                    LOGGER.debug(
+                        "%s: ContinuousMove not advertised; attempting in tolerant PTZ mode",
+                        self.name,
+                    )
 
                 velocity = {}
                 if pan is not None or tilt is not None:
@@ -550,56 +634,70 @@ class ONVIFDevice:
                 )
             elif move_mode == RELATIVE_MOVE:
                 # Guard against unsupported operation
-                if not profile.ptz or not profile.ptz.relative:
+                if profile.ptz and not profile.ptz.relative and not self.ptz_fallback:
                     LOGGER.warning(
                         "RelativeMove not supported on device '%s'", self.name
                     )
                     return
+                if profile.ptz and not profile.ptz.relative and self.ptz_fallback:
+                    LOGGER.debug(
+                        "%s: RelativeMove not advertised; attempting in tolerant PTZ mode",
+                        self.name,
+                    )
 
                 req.Translation = {
                     "PanTilt": {"x": pan_val, "y": tilt_val},
                     "Zoom": {"x": zoom_val},
                 }
-                req.Speed = {
-                    "PanTilt": {"x": speed_val, "y": speed_val},
-                    "Zoom": {"x": speed_val},
-                }
+                if speed_val is not None:
+                    req.Speed = {
+                        "PanTilt": {"x": speed_val, "y": speed_val},
+                        "Zoom": {"x": speed_val},
+                    }
                 await ptz_service.RelativeMove(req)
             elif move_mode == ABSOLUTE_MOVE:
                 # Guard against unsupported operation
-                if not profile.ptz or not profile.ptz.absolute:
+                if profile.ptz and not profile.ptz.absolute and not self.ptz_fallback:
                     LOGGER.warning(
                         "AbsoluteMove not supported on device '%s'", self.name
                     )
                     return
+                if profile.ptz and not profile.ptz.absolute and self.ptz_fallback:
+                    LOGGER.debug(
+                        "%s: AbsoluteMove not advertised; attempting in tolerant PTZ mode",
+                        self.name,
+                    )
 
                 req.Position = {
                     "PanTilt": {"x": pan_val, "y": tilt_val},
                     "Zoom": {"x": zoom_val},
                 }
-                req.Speed = {
-                    "PanTilt": {"x": speed_val, "y": speed_val},
-                    "Zoom": {"x": speed_val},
-                }
+                if speed_val is not None:
+                    req.Speed = {
+                        "PanTilt": {"x": speed_val, "y": speed_val},
+                        "Zoom": {"x": speed_val},
+                    }
                 await ptz_service.AbsoluteMove(req)
             elif move_mode == GOTOPRESET_MOVE:
                 # Guard against unsupported operation
-                if not profile.ptz or not profile.ptz.presets:
-                    LOGGER.warning(
-                        "Absolute Presets not supported on device '%s'", self.name
-                    )
-                    return
-                if preset_val not in profile.ptz.presets:
-                    LOGGER.warning(
-                        (
-                            "PTZ preset '%s' does not exist on device '%s'. Available"
-                            " Presets: %s"
-                        ),
-                        preset_val,
-                        self.name,
-                        ", ".join(profile.ptz.presets),
-                    )
-                    return
+                if profile.ptz and profile.ptz.presets is not None:
+                    if preset_val not in profile.ptz.presets:
+                        if not self.ptz_fallback:
+                            LOGGER.warning(
+                                (
+                                    "PTZ preset '%s' does not exist on device '%s'. Available"
+                                    " Presets: %s"
+                                ),
+                                preset_val,
+                                self.name,
+                                ", ".join(profile.ptz.presets),
+                            )
+                            return
+                        LOGGER.debug(
+                            "%s: PTZ preset '%s' not in reported list; attempting in tolerant PTZ mode",
+                            self.name,
+                            preset_val,
+                        )
 
                 req.PresetToken = preset_val
                 if speed_val is not None:
@@ -616,6 +714,164 @@ class ONVIFDevice:
             else:
                 LOGGER.error("Error trying to perform PTZ action: %s", err)
 
+    async def async_probe_ptz_support(self) -> bool:
+        """Probe PTZ support with lightweight service calls."""
+        if not self.ptz_service_available:
+            return False
+
+        try:
+            ptz_service = await self.device.create_ptz_service()
+        except GET_CAPABILITIES_EXCEPTIONS:
+            return False
+
+        with suppress(*GET_CAPABILITIES_EXCEPTIONS):
+            await ptz_service.GetServiceCapabilities()
+            return True
+
+        for profile in self.profiles:
+            with suppress(*GET_CAPABILITIES_EXCEPTIONS):
+                await ptz_service.GetPresets(profile.token)
+                return True
+
+        return False
+
+    async def async_goto_home(self, profile: Profile) -> None:
+        """Send GotoHomePosition to the camera."""
+        if not self.capabilities.ptz:
+            LOGGER.warning("PTZ actions are not supported on device '%s'", self.name)
+            return
+
+        try:
+            ptz_service = await self.device.create_ptz_service()
+        except GET_CAPABILITIES_EXCEPTIONS as err:
+            LOGGER.warning(
+                "%s: Failed to create PTZ service: %s",
+                self.name,
+                err,
+            )
+            return
+        try:
+            req = ptz_service.create_type("GotoHomePosition")
+            req.ProfileToken = profile.token
+            await ptz_service.GotoHomePosition(req)
+        except ONVIFError as err:
+            LOGGER.error("Error trying to go to Home position: %s", err)
+
+    async def async_set_home(self, profile: Profile) -> None:
+        """Send SetHomePosition to the camera."""
+        if not self.capabilities.ptz:
+            LOGGER.warning("PTZ actions are not supported on device '%s'", self.name)
+            return
+
+        try:
+            ptz_service = await self.device.create_ptz_service()
+        except GET_CAPABILITIES_EXCEPTIONS as err:
+            LOGGER.warning("%s: Failed to create PTZ service: %s", self.name, err)
+            return
+        try:
+            req = ptz_service.create_type("SetHomePosition")
+            req.ProfileToken = profile.token
+            await ptz_service.SetHomePosition(req)
+        except ONVIFError as err:
+            LOGGER.error("Error trying to set Home position: %s", err)
+
+    async def async_goto_preset(
+        self, profile: Profile, preset: str, speed: float | None = None
+    ) -> None:
+        """Send GotoPreset to the camera."""
+        if not self.capabilities.ptz:
+            LOGGER.warning("PTZ actions are not supported on device '%s'", self.name)
+            return
+
+        try:
+            ptz_service = await self.device.create_ptz_service()
+        except GET_CAPABILITIES_EXCEPTIONS as err:
+            LOGGER.warning("%s: Failed to create PTZ service: %s", self.name, err)
+            return
+        try:
+            req = ptz_service.create_type("GotoPreset")
+            req.ProfileToken = profile.token
+            req.PresetToken = preset
+            if speed is not None:
+                req.Speed = {
+                    "PanTilt": {"x": speed, "y": speed},
+                    "Zoom": {"x": speed},
+                }
+            await ptz_service.GotoPreset(req)
+        except ONVIFError as err:
+            LOGGER.error("Error trying to go to PTZ preset '%s': %s", preset, err)
+
+    async def async_set_preset(
+        self,
+        profile: Profile,
+        preset: str,
+        name: str | None = None,
+    ) -> str | None:
+        """Send SetPreset to the camera and return the preset token."""
+        if not self.capabilities.ptz:
+            LOGGER.warning("PTZ actions are not supported on device '%s'", self.name)
+            return None
+
+        try:
+            ptz_service = await self.device.create_ptz_service()
+        except GET_CAPABILITIES_EXCEPTIONS as err:
+            LOGGER.warning("%s: Failed to create PTZ service: %s", self.name, err)
+            return None
+        try:
+            req = ptz_service.create_type("SetPreset")
+            req.ProfileToken = profile.token
+            req.PresetToken = preset
+            req.PresetName = name or preset
+            token = await ptz_service.SetPreset(req)
+        except ONVIFError as err:
+            LOGGER.error("Error trying to set PTZ preset '%s': %s", preset, err)
+            return None
+
+        return token or preset
+
+    async def async_remove_preset(self, profile: Profile, preset: str) -> None:
+        """Send RemovePreset to the camera."""
+        if not self.capabilities.ptz:
+            LOGGER.warning("PTZ actions are not supported on device '%s'", self.name)
+            return
+
+        try:
+            ptz_service = await self.device.create_ptz_service()
+        except GET_CAPABILITIES_EXCEPTIONS as err:
+            LOGGER.warning("%s: Failed to create PTZ service: %s", self.name, err)
+            return
+        try:
+            req = ptz_service.create_type("RemovePreset")
+            req.ProfileToken = profile.token
+            req.PresetToken = preset
+            await ptz_service.RemovePreset(req)
+        except ONVIFError as err:
+            LOGGER.error("Error trying to remove PTZ preset '%s': %s", preset, err)
+
+    async def async_refresh_presets(self, profile: Profile) -> None:
+        """Refresh cached PTZ presets for a profile."""
+        if not self.capabilities.ptz:
+            return
+
+        try:
+            ptz_service = await self.device.create_ptz_service()
+            presets = await ptz_service.GetPresets(profile.token)
+        except GET_CAPABILITIES_EXCEPTIONS:
+            LOGGER.debug(
+                "%s: Failed to refresh presets for profile %s",
+                self.name,
+                profile.token,
+            )
+            if profile.ptz:
+                profile.ptz.presets = None
+            return
+
+        tokens = [preset.token for preset in presets if preset]
+        if profile.ptz is None:
+            profile.ptz = PTZ(True, True, True, presets=tokens)
+        else:
+            profile.ptz.presets = tokens
+
     async def async_run_aux_command(
         self,
         profile: Profile,
@@ -626,7 +882,15 @@ class ONVIFDevice:
             LOGGER.warning("PTZ actions are not supported on device '%s'", self.name)
             return
 
-        ptz_service = await self.device.create_ptz_service()
+        try:
+            ptz_service = await self.device.create_ptz_service()
+        except GET_CAPABILITIES_EXCEPTIONS as err:
+            LOGGER.warning(
+                "%s: Failed to create PTZ service for auxiliary command: %s",
+                self.name,
+                err,
+            )
+            return
 
         LOGGER.debug(
             "Running Aux Command | Cmd = %s",

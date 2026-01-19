@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 
 from haffmpeg.camera import CameraMjpeg
 from onvif.exceptions import ONVIFError
@@ -31,6 +32,7 @@ from .const import (
     ATTR_MOVE_MODE,
     ATTR_PAN,
     ATTR_PRESET,
+    ATTR_PRESET_NAME,
     ATTR_SPEED,
     ATTR_TILT,
     ATTR_ZOOM,
@@ -44,7 +46,15 @@ from .const import (
     GOTOPRESET_MOVE,
     LOGGER,
     RELATIVE_MOVE,
+    SERVICE_GOTO_HOME,
+    SERVICE_GOTO_PRESET,
+    SERVICE_PTZ_MOVE,
     SERVICE_PTZ,
+    SERVICE_PTZ_STOP,
+    SERVICE_PTZ_ZOOM,
+    SERVICE_REMOVE_PRESET,
+    SERVICE_SET_HOME,
+    SERVICE_SET_PRESET,
     STOP_MOVE,
     ZOOM_IN,
     ZOOM_OUT,
@@ -84,6 +94,69 @@ async def async_setup_entry(
             vol.Optional(ATTR_PRESET, default="0"): cv.string,
         },
         "async_perform_ptz",
+    )
+
+    platform.async_register_entity_service(
+        SERVICE_PTZ_MOVE,
+        {
+            vol.Optional(ATTR_PAN): vol.In([DIR_LEFT, DIR_RIGHT]),
+            vol.Optional(ATTR_TILT): vol.In([DIR_UP, DIR_DOWN]),
+            vol.Optional(ATTR_DISTANCE, default=0.1): cv.small_float,
+            vol.Optional(ATTR_SPEED): cv.small_float,
+        },
+        "async_ptz_move",
+    )
+
+    platform.async_register_entity_service(
+        SERVICE_PTZ_ZOOM,
+        {
+            vol.Required(ATTR_ZOOM): vol.In([ZOOM_OUT, ZOOM_IN]),
+            vol.Optional(ATTR_DISTANCE, default=0.1): cv.small_float,
+            vol.Optional(ATTR_SPEED): cv.small_float,
+        },
+        "async_ptz_zoom",
+    )
+
+    platform.async_register_entity_service(
+        SERVICE_PTZ_STOP,
+        {},
+        "async_ptz_stop",
+    )
+
+    platform.async_register_entity_service(
+        SERVICE_GOTO_HOME,
+        {},
+        "async_goto_home",
+    )
+
+    platform.async_register_entity_service(
+        SERVICE_SET_HOME,
+        {},
+        "async_set_home",
+    )
+
+    platform.async_register_entity_service(
+        SERVICE_GOTO_PRESET,
+        {
+            vol.Required(ATTR_PRESET): cv.string,
+            vol.Optional(ATTR_SPEED): cv.small_float,
+        },
+        "async_goto_preset",
+    )
+
+    platform.async_register_entity_service(
+        SERVICE_SET_PRESET,
+        {
+            vol.Required(ATTR_PRESET): cv.string,
+            vol.Optional(ATTR_PRESET_NAME): cv.string,
+        },
+        "async_set_preset",
+    )
+
+    platform.async_register_entity_service(
+        SERVICE_REMOVE_PRESET,
+        {vol.Required(ATTR_PRESET): cv.string},
+        "async_remove_preset",
     )
 
     device = hass.data[DOMAIN][config_entry.unique_id]
@@ -230,3 +303,89 @@ class ONVIFCameraEntity(ONVIFBaseEntity, Camera):
             tilt,
             zoom,
         )
+
+    async def async_ptz_move(
+        self,
+        distance,
+        speed=None,
+        pan=None,
+        tilt=None,
+    ) -> None:
+        """Perform a PTZ pan/tilt move."""
+        if pan is None and tilt is None:
+            LOGGER.warning(
+                "%s: PTZ move called without pan/tilt directions", self.device.name
+            )
+            return
+        await self.device.async_perform_ptz(
+            self.profile,
+            distance,
+            speed,
+            RELATIVE_MOVE,
+            0,
+            None,
+            pan,
+            tilt,
+            None,
+        )
+
+    async def async_ptz_zoom(
+        self,
+        zoom,
+        distance,
+        speed=None,
+    ) -> None:
+        """Perform a PTZ zoom move."""
+        await self.device.async_perform_ptz(
+            self.profile,
+            distance,
+            speed,
+            RELATIVE_MOVE,
+            0,
+            None,
+            None,
+            None,
+            zoom,
+        )
+
+    async def async_ptz_stop(self) -> None:
+        """Stop PTZ motion."""
+        await self.device.async_perform_ptz(
+            self.profile,
+            0,
+            None,
+            STOP_MOVE,
+            0,
+            None,
+            None,
+            None,
+            None,
+        )
+
+    async def async_goto_home(self) -> None:
+        """Go to the configured Home position."""
+        await self.device.async_goto_home(self.profile)
+
+    async def async_set_home(self) -> None:
+        """Set the current position as Home."""
+        await self.device.async_set_home(self.profile)
+
+    async def async_goto_preset(self, preset, speed=None) -> None:
+        """Go to a PTZ preset."""
+        await self.device.async_goto_preset(self.profile, preset, speed)
+
+    async def async_set_preset(self, preset, preset_name=None) -> None:
+        """Create or update a PTZ preset."""
+        token = await self.device.async_set_preset(self.profile, preset, preset_name)
+        if token and self.profile.ptz:
+            if self.profile.ptz.presets is None:
+                self.profile.ptz.presets = [token]
+            elif token not in self.profile.ptz.presets:
+                self.profile.ptz.presets.append(token)
+
+    async def async_remove_preset(self, preset) -> None:
+        """Remove a PTZ preset."""
+        await self.device.async_remove_preset(self.profile, preset)
+        if self.profile.ptz and self.profile.ptz.presets:
+            with suppress(ValueError):
+                self.profile.ptz.presets.remove(preset)

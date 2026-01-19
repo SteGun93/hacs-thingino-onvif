@@ -27,6 +27,12 @@ async def async_get_config_entry_diagnostics(
     data["device"] = {
         "info": asdict(device.info),
         "capabilities": asdict(device.capabilities),
+        "ptz": {
+            "reported": device.ptz_reported,
+            "service_endpoint": device.ptz_service_available,
+            "runtime_probe": device.ptz_supported_runtime,
+            "tolerant_mode": device.ptz_fallback,
+        },
         "profiles": [asdict(profile) for profile in device.profiles],
         "services": {
             str(key): service.url for key, service in device.device.services.items()

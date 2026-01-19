@@ -59,6 +59,11 @@
     }
   },
   "entity": {
+    "select": {
+      "ptz_preset": {
+        "name": "Preset"
+      }
+    },
     "switch": {
       "autofocus": {
         "name": "Autofocus"
@@ -122,6 +127,96 @@
         }
       },
       "name": "PTZ"
+    },
+    "ptz_move": {
+      "description": "Pan and tilt the camera using a relative move.",
+      "fields": {
+        "distance": {
+          "description": "Distance coefficient. Sets how much PTZ should be executed in one request.",
+          "name": "Distance"
+        },
+        "pan": {
+          "description": "Pan direction.",
+          "name": "Pan"
+        },
+        "speed": {
+          "description": "Speed coefficient. Sets how fast PTZ will be executed.",
+          "name": "Speed"
+        },
+        "tilt": {
+          "description": "Tilt direction.",
+          "name": "Tilt"
+        }
+      },
+      "name": "PTZ Move"
+    },
+    "ptz_zoom": {
+      "description": "Zoom the camera using a relative move.",
+      "fields": {
+        "distance": {
+          "description": "Distance coefficient. Sets how much zoom should be executed in one request.",
+          "name": "Distance"
+        },
+        "speed": {
+          "description": "Speed coefficient. Sets how fast zoom will be executed.",
+          "name": "Speed"
+        },
+        "zoom": {
+          "description": "Zoom direction.",
+          "name": "Zoom"
+        }
+      },
+      "name": "PTZ Zoom"
+    },
+    "ptz_stop": {
+      "description": "Stop any ongoing PTZ movement.",
+      "name": "PTZ Stop"
+    },
+    "goto_home": {
+      "description": "Move the camera to the configured Home position.",
+      "name": "Goto Home"
+    },
+    "set_home": {
+      "description": "Set the current position as the Home position.",
+      "name": "Set Home"
+    },
+    "goto_preset": {
+      "description": "Move the camera to a PTZ preset.",
+      "fields": {
+        "preset": {
+          "description": "PTZ preset profile token.",
+          "name": "Preset"
+        },
+        "speed": {
+          "description": "Speed coefficient. Sets how fast PTZ will be executed.",
+          "name": "Speed"
+        }
+      },
+      "name": "Goto Preset"
+    },
+    "set_preset": {
+      "description": "Create or update a PTZ preset.",
+      "fields": {
+        "preset": {
+          "description": "PTZ preset profile token.",
+          "name": "Preset"
+        },
+        "preset_name": {
+          "description": "Optional preset name.",
+          "name": "Preset Name"
+        }
+      },
+      "name": "Set Preset"
+    },
+    "remove_preset": {
+      "description": "Remove a PTZ preset.",
+      "fields": {
+        "preset": {
+          "description": "PTZ preset profile token.",
+          "name": "Preset"
+        }
+      },
+      "name": "Remove Preset"
     }
   }
 }

@@ -9,7 +9,7 @@ from zeep.exceptions import Fault, TransportError
 
 LOGGER = logging.getLogger(__package__)
 
-DOMAIN = "onvif"
+DOMAIN = "thingino_onvif"
 
 DEFAULT_PORT = 80
 DEFAULT_ARGUMENTS = "-pred 1"
@@ -28,6 +28,7 @@ ATTR_SPEED = "speed"
 ATTR_MOVE_MODE = "move_mode"
 ATTR_CONTINUOUS_DURATION = "continuous_duration"
 ATTR_PRESET = "preset"
+ATTR_PRESET_NAME = "preset_name"
 
 DIR_UP = "UP"
 DIR_DOWN = "DOWN"
@@ -45,6 +46,14 @@ GOTOPRESET_MOVE = "GotoPreset"
 STOP_MOVE = "Stop"
 
 SERVICE_PTZ = "ptz"
+SERVICE_PTZ_MOVE = "ptz_move"
+SERVICE_PTZ_STOP = "ptz_stop"
+SERVICE_PTZ_ZOOM = "ptz_zoom"
+SERVICE_GOTO_HOME = "goto_home"
+SERVICE_SET_HOME = "set_home"
+SERVICE_GOTO_PRESET = "goto_preset"
+SERVICE_SET_PRESET = "set_preset"
+SERVICE_REMOVE_PRESET = "remove_preset"
 
 
 # Some cameras don't support the GetServiceCapabilities call

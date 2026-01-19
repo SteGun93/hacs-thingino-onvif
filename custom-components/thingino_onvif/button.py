@@ -18,7 +18,13 @@ async def async_setup_entry(
 ) -> None:
     """Set up ONVIF button based on a config entry."""
     device = hass.data[DOMAIN][config_entry.unique_id]
-    async_add_entities([RebootButton(device), SetSystemDateAndTimeButton(device)])
+    entities: list[ButtonEntity] = [
+        RebootButton(device),
+        SetSystemDateAndTimeButton(device),
+    ]
+    if device.capabilities.ptz:
+        entities += [GotoHomeButton(device), SetHomeButton(device)]
+    async_add_entities(entities)
 
 
 class RebootButton(ONVIFBaseEntity, ButtonEntity):
@@ -53,3 +59,33 @@ class SetSystemDateAndTimeButton(ONVIFBaseEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Send out a SetSystemDateAndTime command."""
         await self.device.async_manually_set_date_and_time()
+
+
+class GotoHomeButton(ONVIFBaseEntity, ButtonEntity):
+    """Defines a ONVIF GotoHomePosition button."""
+
+    def __init__(self, device: ONVIFDevice) -> None:
+        """Initialize the button entity."""
+        super().__init__(device)
+        self._attr_name = f"{self.device.name} Home"
+        self._attr_unique_id = f"{self.mac_or_serial}_ptz_home"
+
+    async def async_press(self) -> None:
+        """Send out a GotoHomePosition command."""
+        await self.device.async_goto_home(self.device.profiles[0])
+
+
+class SetHomeButton(ONVIFBaseEntity, ButtonEntity):
+    """Defines a ONVIF SetHomePosition button."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, device: ONVIFDevice) -> None:
+        """Initialize the button entity."""
+        super().__init__(device)
+        self._attr_name = f"{self.device.name} Set Home"
+        self._attr_unique_id = f"{self.mac_or_serial}_ptz_set_home"
+
+    async def async_press(self) -> None:
+        """Send out a SetHomePosition command."""
+        await self.device.async_set_home(self.device.profiles[0])
