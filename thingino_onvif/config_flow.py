@@ -68,6 +68,7 @@ from .thingino_http import async_fetch_thingino_onvif_json
 CONF_MANUAL_INPUT = "Manually configure ONVIF device"
 CONF_SELECTED_DEVICES = "devices"
 
+LOGGER.warning("THINGINO_ONVIF LOADED FROM: %s", __file__)
 
 def wsdiscovery() -> list[Service]:
     """Get ONVIF devices from network via WS-Discovery."""
