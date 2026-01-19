@@ -164,6 +164,8 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
         self.thingino_http_password: str | None = None
         self._selected_devices: list[dict[str, Any]] = []
         self._discovered_devices: dict[str, dict[str, Any]] = {}
+        self._bulk_onvif_username: str = ""
+        self._bulk_onvif_password: str = ""
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -269,7 +271,7 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
                         for device in self._selected_devices
                     ],
                 )
-                return await self.async_step_thingino_http_auth_bulk()
+                return await self.async_step_onvif_auth_bulk()
 
         discovery = await async_discovery(self.hass)
         self._discovered_devices = {}
@@ -338,10 +340,7 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
                 )
             errors, description_placeholders = await self.async_setup_profiles()
             if not errors:
-                thingino_status = await self._async_check_thingino_http(
-                    self.onvif_config.get(CONF_USERNAME),
-                    self.onvif_config.get(CONF_PASSWORD),
-                )
+                thingino_status = await self._async_check_thingino_http(None, None)
                 if thingino_status == 401:
                     return await self.async_step_thingino_http_auth()
                 title = f"{self.onvif_config[CONF_NAME]} - {self.device_id}"
@@ -367,6 +366,28 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
             description_placeholders=description_placeholders,
+        )
+
+    async def async_step_onvif_auth_bulk(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for ONVIF credentials (SOAP) for selected devices."""
+        errors: dict[str, str] = {}
+
+        if user_input:
+            self._bulk_onvif_username = user_input.get(CONF_USERNAME, "")
+            self._bulk_onvif_password = user_input.get(CONF_PASSWORD, "")
+            return await self.async_step_thingino_http_auth_bulk()
+
+        return self.async_show_form(
+            step_id="onvif_auth_bulk",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_USERNAME, default="thingino"): str,
+                    vol.Optional(CONF_PASSWORD, default="thingino"): str,
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_thingino_http_auth_bulk(
@@ -420,8 +441,8 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
                         CONF_HOST: first[CONF_HOST],
                         CONF_PORT: first[CONF_PORT],
                         CONF_NAME: first[CONF_NAME],
-                        CONF_USERNAME: "",
-                        CONF_PASSWORD: "",
+                        CONF_USERNAME: self._bulk_onvif_username,
+                        CONF_PASSWORD: self._bulk_onvif_password,
                     }
                 )
                 title = f"{first[CONF_NAME]} - {self.device_id}"
@@ -431,8 +452,8 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
                         CONF_NAME: first[CONF_NAME],
                         CONF_HOST: first[CONF_HOST],
                         CONF_PORT: first[CONF_PORT],
-                        CONF_USERNAME: "",
-                        CONF_PASSWORD: "",
+                        CONF_USERNAME: self._bulk_onvif_username,
+                        CONF_PASSWORD: self._bulk_onvif_password,
                     },
                     options=options,
                 )
@@ -461,8 +482,8 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
                 CONF_NAME: device[CONF_NAME],
                 CONF_HOST: device[CONF_HOST],
                 CONF_PORT: device[CONF_PORT],
-                CONF_USERNAME: "",
-                CONF_PASSWORD: "",
+                CONF_USERNAME: self._bulk_onvif_username,
+                CONF_PASSWORD: self._bulk_onvif_password,
                 "options": options,
             }
             self.hass.async_create_task(
@@ -506,14 +527,15 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
             if status == 401:
                 errors["base"] = "auth_failed"
             else:
-                self.onvif_config[CONF_THINGINO_HTTP_USERNAME] = (
-                    self.thingino_http_username
-                )
-                self.onvif_config[CONF_THINGINO_HTTP_PASSWORD] = (
-                    self.thingino_http_password
-                )
                 title = f"{self.onvif_config[CONF_NAME]} - {self.device_id}"
-                return self.async_create_entry(title=title, data=self.onvif_config)
+                return self.async_create_entry(
+                    title=title,
+                    data=self.onvif_config,
+                    options={
+                        CONF_THINGINO_HTTP_USERNAME: self.thingino_http_username,
+                        CONF_THINGINO_HTTP_PASSWORD: self.thingino_http_password,
+                    },
+                )
 
         return self.async_show_form(
             step_id="thingino_http_auth",
