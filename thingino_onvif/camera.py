@@ -33,11 +33,17 @@ from .const import (
     ATTR_PAN,
     ATTR_PRESET,
     ATTR_PRESET_NAME,
+    ATTR_PAN_STEPS,
+    ATTR_TILT_STEPS,
+    ATTR_ZOOM_STEPS,
+    ATTR_PROFILE_TOKEN,
     ATTR_SPEED,
     ATTR_TILT,
     ATTR_ZOOM,
     CONF_SNAPSHOT_AUTH,
+    CONF_PTZ_AUTO_STOP,
     CONTINUOUS_MOVE,
+    DEFAULT_PTZ_AUTO_STOP,
     DIR_DOWN,
     DIR_LEFT,
     DIR_RIGHT,
@@ -48,6 +54,8 @@ from .const import (
     RELATIVE_MOVE,
     SERVICE_GOTO_HOME,
     SERVICE_GOTO_PRESET,
+    SERVICE_PTZ_ABSOLUTE_STEPS,
+    SERVICE_PTZ_CONTINUOUS,
     SERVICE_PTZ_MOVE,
     SERVICE_PTZ,
     SERVICE_PTZ_STOP,
@@ -121,6 +129,31 @@ async def async_setup_entry(
         SERVICE_PTZ_STOP,
         {},
         "async_ptz_stop",
+    )
+
+    platform.async_register_entity_service(
+        SERVICE_PTZ_CONTINUOUS,
+        {
+            vol.Optional(ATTR_PAN): vol.In([DIR_LEFT, DIR_RIGHT]),
+            vol.Optional(ATTR_TILT): vol.In([DIR_UP, DIR_DOWN]),
+            vol.Optional(ATTR_ZOOM): vol.In([ZOOM_OUT, ZOOM_IN]),
+            vol.Optional(ATTR_SPEED): cv.small_float,
+            vol.Optional(ATTR_CONTINUOUS_DURATION): cv.small_float,
+            vol.Optional(ATTR_PROFILE_TOKEN): cv.string,
+        },
+        "async_ptz_continuous",
+    )
+
+    platform.async_register_entity_service(
+        SERVICE_PTZ_ABSOLUTE_STEPS,
+        {
+            vol.Required(ATTR_PAN_STEPS): vol.Coerce(float),
+            vol.Required(ATTR_TILT_STEPS): vol.Coerce(float),
+            vol.Optional(ATTR_ZOOM_STEPS): vol.Coerce(float),
+            vol.Optional(ATTR_SPEED): cv.small_float,
+            vol.Optional(ATTR_PROFILE_TOKEN): cv.string,
+        },
+        "async_ptz_absolute_steps",
     )
 
     platform.async_register_entity_service(
@@ -362,6 +395,59 @@ class ONVIFCameraEntity(ONVIFBaseEntity, Camera):
             None,
         )
 
+    async def async_ptz_continuous(
+        self,
+        pan=None,
+        tilt=None,
+        zoom=None,
+        speed=None,
+        continuous_duration=None,
+        profile_token=None,
+    ) -> None:
+        """Perform a PTZ continuous move with optional auto-stop."""
+        if pan is None and tilt is None and zoom is None:
+            LOGGER.warning(
+                "%s: PTZ continuous called without directions", self.device.name
+            )
+            return
+        profile = self._resolve_profile(profile_token)
+        duration = (
+            continuous_duration
+            if continuous_duration is not None
+            else self.device.config_entry.options.get(
+                CONF_PTZ_AUTO_STOP, DEFAULT_PTZ_AUTO_STOP
+            )
+        )
+        await self.device.async_perform_ptz(
+            profile,
+            1,
+            speed,
+            CONTINUOUS_MOVE,
+            duration,
+            None,
+            pan,
+            tilt,
+            zoom,
+        )
+
+    async def async_ptz_absolute_steps(
+        self,
+        pan_steps,
+        tilt_steps,
+        zoom_steps=None,
+        speed=None,
+        profile_token=None,
+    ) -> None:
+        """Perform an absolute move using step values."""
+        profile = self._resolve_profile(profile_token)
+        await self.device.async_absolute_move_steps(
+            profile,
+            pan_steps,
+            tilt_steps,
+            speed,
+            zoom_steps,
+        )
+
     async def async_goto_home(self) -> None:
         """Go to the configured Home position."""
         await self.device.async_goto_home(self.profile)
@@ -376,7 +462,11 @@ class ONVIFCameraEntity(ONVIFBaseEntity, Camera):
 
     async def async_set_preset(self, preset, preset_name=None) -> None:
         """Create or update a PTZ preset."""
+        if not preset:
+            LOGGER.warning("%s: Preset name is required", self.device.name)
+            return
         token = await self.device.async_set_preset(self.profile, preset, preset_name)
+        await self.device.async_refresh_presets(self.profile)
         if token and self.profile.ptz:
             if self.profile.ptz.presets is None:
                 self.profile.ptz.presets = [token]
@@ -386,6 +476,15 @@ class ONVIFCameraEntity(ONVIFBaseEntity, Camera):
     async def async_remove_preset(self, preset) -> None:
         """Remove a PTZ preset."""
         await self.device.async_remove_preset(self.profile, preset)
+        await self.device.async_refresh_presets(self.profile)
         if self.profile.ptz and self.profile.ptz.presets:
             with suppress(ValueError):
                 self.profile.ptz.presets.remove(preset)
+
+    def _resolve_profile(self, profile_token: str | None) -> Profile:
+        """Resolve profile by token, falling back to this entity's profile."""
+        if profile_token:
+            for profile in self.device.profiles:
+                if profile.token == profile_token:
+                    return profile
+        return self.profile

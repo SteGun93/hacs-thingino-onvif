@@ -106,6 +106,7 @@
           "thingino_extras_json": "Thingino extras JSON (manual)",
           "thingino_http_password": "Thingino UI password",
           "thingino_http_username": "Thingino UI username",
+          "ptz_auto_stop": "PTZ auto-stop duration (seconds)",
           "rtsp_transport": "RTSP transport mechanism",
           "use_wallclock_as_timestamps": "Use wall clock as timestamps"
         },
@@ -115,7 +116,8 @@
           "thingino_exec_endpoint": "HTTP path or URL used to execute Thingino commands. Supports {cmd} placeholder.",
           "thingino_extras_json": "Manual JSON payload to use when no endpoint is available.",
           "thingino_http_password": "Optional credentials for the Thingino web UI.",
-          "thingino_http_username": "Optional credentials for the Thingino web UI."
+          "thingino_http_username": "Optional credentials for the Thingino web UI.",
+          "ptz_auto_stop": "Default auto-stop delay for ContinuousMove if not specified."
         },
         "title": "ONVIF device options"
       }
@@ -203,6 +205,62 @@
     "ptz_stop": {
       "description": "Stop any ongoing PTZ movement.",
       "name": "PTZ Stop"
+    },
+    "ptz_continuous": {
+      "description": "Start a continuous PTZ move with optional auto-stop.",
+      "fields": {
+        "continuous_duration": {
+          "description": "Optional auto-stop delay in seconds.",
+          "name": "Continuous duration"
+        },
+        "pan": {
+          "description": "Pan direction.",
+          "name": "Pan"
+        },
+        "profile_token": {
+          "description": "Optional profile token.",
+          "name": "Profile Token"
+        },
+        "speed": {
+          "description": "Speed coefficient. Sets how fast PTZ will be executed.",
+          "name": "Speed"
+        },
+        "tilt": {
+          "description": "Tilt direction.",
+          "name": "Tilt"
+        },
+        "zoom": {
+          "description": "Zoom direction.",
+          "name": "Zoom"
+        }
+      },
+      "name": "PTZ Continuous"
+    },
+    "ptz_absolute_steps": {
+      "description": "Move to an absolute position using step values.",
+      "fields": {
+        "pan_steps": {
+          "description": "Pan position in steps.",
+          "name": "Pan Steps"
+        },
+        "profile_token": {
+          "description": "Optional profile token.",
+          "name": "Profile Token"
+        },
+        "speed": {
+          "description": "Speed coefficient. Sets how fast PTZ will be executed.",
+          "name": "Speed"
+        },
+        "tilt_steps": {
+          "description": "Tilt position in steps.",
+          "name": "Tilt Steps"
+        },
+        "zoom_steps": {
+          "description": "Zoom position in steps.",
+          "name": "Zoom Steps"
+        }
+      },
+      "name": "PTZ Absolute Steps"
     },
     "goto_home": {
       "description": "Move the camera to the configured Home position.",

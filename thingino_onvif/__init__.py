@@ -32,8 +32,10 @@ from .const import (
     CONF_THINGINO_EXEC_ENDPOINT,
     CONF_THINGINO_HTTP_PASSWORD,
     CONF_THINGINO_HTTP_USERNAME,
+    CONF_PTZ_AUTO_STOP,
     DEFAULT_ARGUMENTS,
     DEFAULT_ENABLE_WEBHOOKS,
+    DEFAULT_PTZ_AUTO_STOP,
     DEFAULT_THINGINO_EXTRAS_ENABLED,
     DEFAULT_THINGINO_EXEC_ENDPOINT,
     DOMAIN,
@@ -185,6 +187,7 @@ async def async_populate_options(hass: HomeAssistant, entry: ConfigEntry) -> Non
         CONF_THINGINO_EXTRAS_JSON: "",
         CONF_THINGINO_HTTP_USERNAME: "",
         CONF_THINGINO_HTTP_PASSWORD: "",
+        CONF_PTZ_AUTO_STOP: DEFAULT_PTZ_AUTO_STOP,
     }
 
     hass.config_entries.async_update_entry(entry, options=options)

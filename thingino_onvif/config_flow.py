@@ -53,9 +53,11 @@ from .const import (
     CONF_THINGINO_EXEC_ENDPOINT,
     CONF_THINGINO_HTTP_PASSWORD,
     CONF_THINGINO_HTTP_USERNAME,
+    CONF_PTZ_AUTO_STOP,
     DEFAULT_ARGUMENTS,
     DEFAULT_ENABLE_WEBHOOKS,
     DEFAULT_PORT,
+    DEFAULT_PTZ_AUTO_STOP,
     DEFAULT_THINGINO_EXTRAS_ENABLED,
     DEFAULT_THINGINO_INFO_ENDPOINT,
     DEFAULT_THINGINO_EXEC_ENDPOINT,
@@ -768,6 +770,10 @@ class OnvifOptionsFlowHandler(OptionsFlow):
                 CONF_THINGINO_HTTP_PASSWORD,
                 self.config_entry.options.get(CONF_THINGINO_HTTP_PASSWORD, ""),
             )
+            self.options[CONF_PTZ_AUTO_STOP] = user_input.get(
+                CONF_PTZ_AUTO_STOP,
+                self.config_entry.options.get(CONF_PTZ_AUTO_STOP, DEFAULT_PTZ_AUTO_STOP),
+            )
             return self.async_create_entry(title="", data=self.options)
 
         advanced_options = {}
@@ -840,6 +846,12 @@ class OnvifOptionsFlowHandler(OptionsFlow):
                             CONF_THINGINO_HTTP_PASSWORD, ""
                         ),
                     ): str,
+                    vol.Optional(
+                        CONF_PTZ_AUTO_STOP,
+                        default=self.config_entry.options.get(
+                            CONF_PTZ_AUTO_STOP, DEFAULT_PTZ_AUTO_STOP
+                        ),
+                    ): cv.small_float,
                     **advanced_options,
                 }
             ),

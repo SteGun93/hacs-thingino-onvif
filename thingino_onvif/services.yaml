@@ -118,6 +118,78 @@ ptz_stop:
     entity:
       integration: thingino_onvif
       domain: camera
+ptz_continuous:
+  target:
+    entity:
+      integration: thingino_onvif
+      domain: camera
+  fields:
+    pan:
+      selector:
+        select:
+          options:
+            - "LEFT"
+            - "RIGHT"
+    tilt:
+      selector:
+        select:
+          options:
+            - "DOWN"
+            - "UP"
+    zoom:
+      selector:
+        select:
+          options:
+            - "ZOOM_IN"
+            - "ZOOM_OUT"
+    speed:
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.01
+    continuous_duration:
+      selector:
+        number:
+          min: 0
+          max: 5
+          step: 0.1
+    profile_token:
+      selector:
+        text:
+ptz_absolute_steps:
+  target:
+    entity:
+      integration: thingino_onvif
+      domain: camera
+  fields:
+    pan_steps:
+      selector:
+        number:
+          min: 0
+          max: 5000
+          step: 1
+    tilt_steps:
+      selector:
+        number:
+          min: 0
+          max: 2000
+          step: 1
+    zoom_steps:
+      selector:
+        number:
+          min: 0
+          max: 2000
+          step: 1
+    speed:
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.01
+    profile_token:
+      selector:
+        text:
 goto_home:
   target:
     entity:

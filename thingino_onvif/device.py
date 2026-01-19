@@ -803,6 +803,96 @@ class ONVIFDevice:
             steps = round(value)
         return self._ptz_clamp(steps, min_val, max_val)
 
+    def _ptz_steps_to_normalized(
+        self, value: float, min_val: float | None, max_val: float | None
+    ) -> float:
+        """Convert step values into ONVIF normalized values."""
+        if min_val is None or max_val is None:
+            return value
+        if max_val == min_val:
+            return 0.0
+        clamped = self._ptz_clamp(value, min_val, max_val)
+        unit = (clamped - min_val) / (max_val - min_val)
+        if min_val < 0:
+            return unit * 2 - 1
+        return unit
+
+    async def async_absolute_move_steps(
+        self,
+        profile: Profile,
+        pan_steps: float,
+        tilt_steps: float,
+        speed: float | None = None,
+        zoom_steps: float | None = None,
+    ) -> None:
+        """Move to an absolute position using step inputs."""
+        if not self.capabilities.ptz:
+            LOGGER.warning("PTZ actions are not supported on device '%s'", self.name)
+            return
+        if not profile.ptz_limits:
+            LOGGER.warning("%s: PTZ limits missing for profile %s", self.name, profile.token)
+            return
+
+        try:
+            ptz_service = await self._async_onvif_call(
+                "create_ptz_service", self.device.create_ptz_service
+            )
+        except GET_CAPABILITIES_EXCEPTIONS as err:
+            LOGGER.warning("%s: Failed to create PTZ service: %s", self.name, err)
+            return
+
+        limits = profile.ptz_limits
+        if self.thingino_ptz_mode:
+            pan_val = self._ptz_clamp(pan_steps, limits.pan_min, limits.pan_max)
+            tilt_val = self._ptz_clamp(tilt_steps, limits.tilt_min, limits.tilt_max)
+            zoom_val = (
+                self._ptz_clamp(zoom_steps, limits.zoom_min, limits.zoom_max)
+                if zoom_steps is not None
+                else None
+            )
+            mapping = "steps"
+        else:
+            pan_val = self._ptz_steps_to_normalized(
+                pan_steps, limits.pan_min, limits.pan_max
+            )
+            tilt_val = self._ptz_steps_to_normalized(
+                tilt_steps, limits.tilt_min, limits.tilt_max
+            )
+            zoom_val = (
+                self._ptz_steps_to_normalized(
+                    zoom_steps, limits.zoom_min, limits.zoom_max
+                )
+                if zoom_steps is not None
+                else None
+            )
+            mapping = "normalized"
+
+        LOGGER.debug(
+            "%s: AbsoluteMove steps pan=%s tilt=%s zoom=%s mapping=%s profile=%s",
+            self.name,
+            pan_steps,
+            tilt_steps,
+            zoom_steps,
+            mapping,
+            profile.token,
+        )
+
+        try:
+            req = ptz_service.create_type("AbsoluteMove")
+            req.ProfileToken = profile.token
+            position = {"PanTilt": {"x": pan_val, "y": tilt_val}}
+            if zoom_val is not None:
+                position["Zoom"] = {"x": zoom_val}
+            req.Position = position
+            if speed is not None:
+                req.Speed = {
+                    "PanTilt": {"x": speed, "y": speed},
+                    "Zoom": {"x": speed},
+                }
+            await self._async_onvif_call("AbsoluteMove", ptz_service.AbsoluteMove, req)
+        except ONVIFError as err:
+            LOGGER.error("Error trying to perform AbsoluteMove: %s", err)
+
     async def async_perform_ptz(
         self,
         profile: Profile,
