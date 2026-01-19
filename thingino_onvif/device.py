@@ -1316,7 +1316,7 @@ class ONVIFDevice:
             outputs = await self._async_onvif_call(
                 "GetRelayOutputs", deviceio.GetRelayOutputs
             )
-        except (GET_CAPABILITIES_EXCEPTIONS, XMLParseError, TypeError, ValueError):
+        except GET_CAPABILITIES_EXCEPTIONS + (XMLParseError, TypeError, ValueError):
             return []
 
         if not isinstance(outputs, list):
