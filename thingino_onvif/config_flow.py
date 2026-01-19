@@ -82,7 +82,6 @@ def wsdiscovery() -> list[Service]:
                     "dp0",
                 )
             ],
-            # scopes=[Scope("onvif://www.onvif.org/Profile/Streaming")],
             timeout=10,
         )
     finally:
