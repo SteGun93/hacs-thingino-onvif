@@ -41,6 +41,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
+from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig
 
 from .const import (
     CONF_DEVICE_ID,
@@ -128,7 +129,7 @@ async def async_discovery(hass: HomeAssistant) -> list[dict[str, Any]]:
             CONF_PORT: url.port or 80,
             CONF_HARDWARE: None,
         }
-        for scope in service.getScopes():
+        for scope in service.getScopes() or []:
             scope_str = scope.getValue()
             if scope_str.lower().startswith("onvif://www.onvif.org/name"):
                 device[CONF_NAME] = scope_str.split("/")[-1]
@@ -302,7 +303,18 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
             return self.async_show_form(
                 step_id="device",
                 data_schema=vol.Schema(
-                    {vol.Required(CONF_SELECTED_DEVICES): vol.MultiSelect(devices)}
+                    {
+                        vol.Required(CONF_SELECTED_DEVICES): SelectSelector(
+                            SelectSelectorConfig(
+                                options=[
+                                    {"value": key, "label": label}
+                                    for key, label in devices.items()
+                                ],
+                                multiple=True,
+                                mode="list",
+                            )
+                        )
+                    }
                 ),
                 errors=errors,
             )
