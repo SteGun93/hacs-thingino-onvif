@@ -23,9 +23,13 @@ CONF_THINGINO_EXTRAS_ENABLED = "thingino_extras_enabled"
 CONF_THINGINO_EXTRAS_ENDPOINT = "thingino_extras_endpoint"
 CONF_THINGINO_EXEC_ENDPOINT = "thingino_exec_endpoint"
 CONF_THINGINO_EXTRAS_JSON = "thingino_extras_json"
+CONF_THINGINO_HTTP_USERNAME = "thingino_http_username"
+CONF_THINGINO_HTTP_PASSWORD = "thingino_http_password"
 
 DEFAULT_THINGINO_EXTRAS_ENABLED = True
+DEFAULT_THINGINO_INFO_ENDPOINT = "/x/info.cgi?onvif"
 DEFAULT_THINGINO_EXTRAS_ENDPOINTS = (
+    "/x/info.cgi?onvif",
     "/etc/onvif.json",
     "/onvif.json",
     "/cgi-bin/onvif.json",

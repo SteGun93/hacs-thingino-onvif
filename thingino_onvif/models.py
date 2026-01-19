@@ -47,6 +47,18 @@ class PTZ:
 
 
 @dataclass
+class PTZLimits:
+    """Represents PTZ range limits."""
+
+    pan_min: float | None = None
+    pan_max: float | None = None
+    tilt_min: float | None = None
+    tilt_max: float | None = None
+    zoom_min: float | None = None
+    zoom_max: float | None = None
+
+
+@dataclass
 class Profile:
     """Represent a ONVIF Profile."""
 
@@ -56,6 +68,7 @@ class Profile:
     video: Video
     ptz: PTZ | None = None
     video_source_token: str | None = None
+    ptz_limits: PTZLimits | None = None
 
 
 @dataclass

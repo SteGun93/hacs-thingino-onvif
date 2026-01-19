@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 import aiohttp
+from aiohttp.client_exceptions import ServerDisconnectedError
 import onvif
 from onvif import ONVIFCamera
 from onvif.exceptions import ONVIFError
@@ -37,8 +38,11 @@ from .const import (
     CONF_THINGINO_EXTRAS_ENDPOINT,
     CONF_THINGINO_EXTRAS_JSON,
     CONF_THINGINO_EXEC_ENDPOINT,
+    CONF_THINGINO_HTTP_PASSWORD,
+    CONF_THINGINO_HTTP_USERNAME,
     CONTINUOUS_MOVE,
     DEFAULT_ENABLE_WEBHOOKS,
+    DEFAULT_THINGINO_INFO_ENDPOINT,
     DEFAULT_THINGINO_EXTRAS_ENABLED,
     DEFAULT_THINGINO_EXTRAS_ENDPOINTS,
     DEFAULT_THINGINO_EXEC_ENDPOINT,
@@ -61,8 +65,10 @@ from .models import (
     ThinginoAuxCommand,
     ThinginoRelay,
     ThinginoToggle,
+    PTZLimits,
     Video,
 )
+from .thingino_http import async_fetch_thingino_onvif_json
 from .util import format_thingino_label, normalize_thingino_label, thingino_icon_for_label
 
 
@@ -87,10 +93,16 @@ class ONVIFDevice:
         self.platforms: list[Platform] = []
 
         self._dt_diff_seconds: float = 0
+        self._onvif_session: aiohttp.ClientSession | None = None
+        self._onvif_session_supports_custom: bool | None = None
+        self.onvif_retry_count: int = 0
+        self.onvif_reset_count: int = 0
         self.ptz_service_available: bool = False
         self.ptz_reported: bool = False
         self.ptz_supported_runtime: bool = False
         self.ptz_fallback: bool = False
+        self.thingino_ptz_mode: bool = False
+        self.ptz_mapping_mode: str | None = None
         self.thingino_extras_enabled: bool = False
         self.thingino_extras_source: str | None = None
         self.thingino_extras_endpoint: str | None = None
@@ -133,20 +145,16 @@ class ONVIFDevice:
 
     async def async_setup(self) -> None:
         """Set up the device."""
-        self.device = get_device(
-            self.hass,
-            host=self.config_entry.data[CONF_HOST],
-            port=self.config_entry.data[CONF_PORT],
-            username=self.config_entry.data[CONF_USERNAME],
-            password=self.config_entry.data[CONF_PASSWORD],
-        )
+        self.device = await self._async_create_onvif_client()
 
         # Get all device info
-        await self.device.update_xaddrs()
+        await self._async_onvif_call("update_xaddrs", self.device.update_xaddrs)
         LOGGER.debug("%s: xaddrs = %s", self.name, self.device.xaddrs)
 
         # Get device capabilities
-        self.onvif_capabilities = await self.device.get_capabilities()
+        self.onvif_capabilities = await self._async_onvif_call(
+            "get_capabilities", self.device.get_capabilities
+        )
 
         await self.async_check_date_and_time()
 
@@ -156,6 +164,7 @@ class ONVIFDevice:
 
         # Fetch basic device info and capabilities
         self.info = await self.async_get_device_info()
+        self._maybe_enable_thingino_ptz(PTZLimits())
         LOGGER.debug("%s: camera info = %s", self.name, self.info)
 
         #
@@ -241,10 +250,14 @@ class ONVIFDevice:
         if self.events:
             await self.events.async_stop()
         await self.device.close()
+        if self._onvif_session and not self._onvif_session.closed:
+            await self._onvif_session.close()
 
     async def async_manually_set_date_and_time(self) -> None:
         """Set Date and Time Manually using SetSystemDateAndTime command."""
-        device_mgmt = await self.device.create_devicemgmt_service()
+        device_mgmt = await self._async_onvif_call(
+            "create_devicemgmt_service", self.device.create_devicemgmt_service
+        )
 
         # Retrieve DateTime object from camera to use as template for Set operation
         device_time = await device_mgmt.GetSystemDateAndTime()
@@ -397,7 +410,9 @@ class ONVIFDevice:
         firmware_version = None
         serial_number = None
         try:
-            device_info = await device_mgmt.GetDeviceInformation()
+            device_info = await self._async_onvif_call(
+                "GetDeviceInformation", device_mgmt.GetDeviceInformation
+            )
         except (XMLParseError, XMLSyntaxError, TransportError) as ex:
             # Some cameras have invalid UTF-8 in their device information (TransportError)
             # and others have completely invalid XML (XMLParseError, XMLSyntaxError)
@@ -411,7 +426,9 @@ class ONVIFDevice:
         # Grab the last MAC address for backwards compatibility
         mac = None
         try:
-            network_interfaces = await device_mgmt.GetNetworkInterfaces()
+            network_interfaces = await self._async_onvif_call(
+                "GetNetworkInterfaces", device_mgmt.GetNetworkInterfaces
+            )
             for interface in network_interfaces:
                 if interface.Enabled:
                     mac = interface.Info.HwAddress
@@ -467,6 +484,68 @@ class ONVIFDevice:
 
         return Capabilities(snapshot=snapshot, ptz=ptz, imaging=imaging)
 
+    async def _async_create_onvif_client(self) -> ONVIFCamera:
+        """Create an ONVIF client with a reusable aiohttp session."""
+        session = await self._async_get_onvif_session()
+        return get_device(
+            self.hass,
+            host=self.config_entry.data[CONF_HOST],
+            port=self.config_entry.data[CONF_PORT],
+            username=self.config_entry.data[CONF_USERNAME],
+            password=self.config_entry.data[CONF_PASSWORD],
+            session=session,
+        )
+
+    async def _async_get_onvif_session(self) -> aiohttp.ClientSession | None:
+        """Return or create the shared aiohttp session for ONVIF."""
+        if self._onvif_session and not self._onvif_session.closed:
+            return self._onvif_session
+        connector = aiohttp.TCPConnector(limit=10, keepalive_timeout=30)
+        timeout = aiohttp.ClientTimeout(total=10)
+        self._onvif_session = aiohttp.ClientSession(
+            connector=connector, timeout=timeout
+        )
+        return self._onvif_session
+
+    async def _async_onvif_call(
+        self, label: str, func, *args, retries: int = 2, **kwargs
+    ):
+        """Call an ONVIF function with retry on disconnects."""
+        for attempt in range(retries + 1):
+            try:
+                return await func(*args, **kwargs)
+            except ServerDisconnectedError as err:
+                self.onvif_retry_count += 1
+                LOGGER.debug(
+                    "%s: ONVIF call '%s' disconnected (attempt %s/%s): %s",
+                    self.name,
+                    label,
+                    attempt + 1,
+                    retries + 1,
+                    err,
+                )
+                if attempt >= retries:
+                    raise
+                await self._async_reset_onvif_client("disconnect")
+                await asyncio.sleep(0.2 * (attempt + 1))
+
+    async def _async_reset_onvif_client(self, reason: str) -> None:
+        """Reset the ONVIF client/session after a disconnect."""
+        self.onvif_reset_count += 1
+        LOGGER.debug("%s: Resetting ONVIF client (%s)", self.name, reason)
+        try:
+            await self.device.close()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("%s: Error closing ONVIF client: %s", self.name, err)
+
+        if self._onvif_session and not self._onvif_session.closed:
+            await self._onvif_session.close()
+        self._onvif_session = None
+        self.device = await self._async_create_onvif_client()
+        if self.events:
+            self.events.device = self.device
+        await self._async_onvif_call("update_xaddrs", self.device.update_xaddrs)
+
     async def async_start_events(self):
         """Start the event handler."""
         with suppress(*GET_CAPABILITIES_EXCEPTIONS, XMLParseError):
@@ -490,10 +569,14 @@ class ONVIFDevice:
 
     async def async_get_profiles(self) -> list[Profile]:
         """Obtain media profiles for this device."""
-        media_service = await self.device.create_media_service()
+        media_service = await self._async_onvif_call(
+            "create_media_service", self.device.create_media_service
+        )
         LOGGER.debug("%s: xaddr for media_service: %s", self.name, media_service.xaddr)
         try:
-            result = await media_service.GetProfiles()
+            result = await self._async_onvif_call(
+                "GetProfiles", media_service.GetProfiles
+            )
         except GET_CAPABILITIES_EXCEPTIONS:
             LOGGER.debug(
                 "%s: Could not get profiles from ONVIF device", self.name, exc_info=True
@@ -536,6 +619,11 @@ class ONVIFDevice:
                         onvif_profile.PTZConfiguration.DefaultAbsolutePantTiltPositionSpace
                         is not None,
                     )
+                    profile.ptz_limits = self._extract_ptz_limits(
+                        onvif_profile.PTZConfiguration
+                    )
+                    if profile.ptz_limits:
+                        self._maybe_enable_thingino_ptz(profile.ptz_limits)
                 else:
                     profile.ptz = PTZ(True, True, True)
                     LOGGER.debug(
@@ -545,8 +633,12 @@ class ONVIFDevice:
                     )
 
                 try:
-                    ptz_service = await self.device.create_ptz_service()
-                    presets = await ptz_service.GetPresets(profile.token)
+                    ptz_service = await self._async_onvif_call(
+                        "create_ptz_service", self.device.create_ptz_service
+                    )
+                    presets = await self._async_onvif_call(
+                        "GetPresets", ptz_service.GetPresets, profile.token
+                    )
                     profile.ptz.presets = [preset.token for preset in presets if preset]
                     LOGGER.debug(
                         "%s: PTZ presets for profile %s: %s",
@@ -586,6 +678,129 @@ class ONVIFDevice:
         result = await media_service.GetStreamUri(req)
         return result.Uri
 
+    def _extract_ptz_limits(self, ptz_config) -> PTZLimits | None:
+        """Extract PTZ limits from a PTZConfiguration."""
+        limits = PTZLimits()
+
+        pan_tilt_limits = getattr(ptz_config, "PanTiltLimits", None)
+        if pan_tilt_limits:
+            range_obj = getattr(pan_tilt_limits, "Range", pan_tilt_limits)
+            pan_min, pan_max = self._extract_axis_range(range_obj, "X")
+            tilt_min, tilt_max = self._extract_axis_range(range_obj, "Y")
+            limits.pan_min = pan_min
+            limits.pan_max = pan_max
+            limits.tilt_min = tilt_min
+            limits.tilt_max = tilt_max
+
+        zoom_limits = getattr(ptz_config, "ZoomLimits", None)
+        if zoom_limits:
+            range_obj = getattr(zoom_limits, "Range", zoom_limits)
+            zoom_min, zoom_max = self._extract_axis_range(range_obj, "X")
+            limits.zoom_min = zoom_min
+            limits.zoom_max = zoom_max
+
+        if any(
+            value is not None
+            for value in (
+                limits.pan_min,
+                limits.pan_max,
+                limits.tilt_min,
+                limits.tilt_max,
+                limits.zoom_min,
+                limits.zoom_max,
+            )
+        ):
+            return limits
+        return None
+
+    def _extract_axis_range(self, range_obj, axis: str) -> tuple[float | None, float | None]:
+        """Extract Min/Max values for an axis range."""
+        axis_range = getattr(range_obj, f"{axis}Range", None) or getattr(
+            range_obj, axis, None
+        )
+        if not axis_range:
+            return None, None
+        return (
+            getattr(axis_range, "Min", None),
+            getattr(axis_range, "Max", None),
+        )
+
+    def _maybe_enable_thingino_ptz(self, limits: PTZLimits) -> None:
+        """Enable Thingino PTZ mode based on device info or limits."""
+        if self.thingino_ptz_mode:
+            return
+        model_hint = " ".join(
+            part for part in (self.info.manufacturer, self.info.model) if part
+        ).lower()
+        if any(token in model_hint for token in ("thingino", "ingenic", "t31", "sc2336")):
+            self.thingino_ptz_mode = True
+            return
+        if self.thingino_extras_source:
+            self.thingino_ptz_mode = True
+            return
+        for min_val, max_val in (
+            (limits.pan_min, limits.pan_max),
+            (limits.tilt_min, limits.tilt_max),
+        ):
+            if min_val is None or max_val is None:
+                continue
+            if min_val >= 0 and max_val >= 10:
+                self.thingino_ptz_mode = True
+                return
+
+    def _ptz_range_size(self, min_val: float | None, max_val: float | None) -> float | None:
+        if min_val is None or max_val is None:
+            return None
+        return max_val - min_val
+
+    def _ptz_max_step(self, min_val: float | None, max_val: float | None) -> float | None:
+        if min_val is None or max_val is None:
+            return None
+        return max(abs(min_val), abs(max_val), abs(max_val - min_val))
+
+    def _ptz_clamp(self, value: float, min_val: float | None, max_val: float | None) -> float:
+        if min_val is not None:
+            value = max(value, min_val)
+        if max_val is not None:
+            value = min(value, max_val)
+        return value
+
+    def _ptz_is_normalized(self, value: float | None) -> bool:
+        if value is None:
+            return False
+        return -1.001 <= value <= 1.001
+
+    def _ptz_normalize_to_unit(self, value: float, min_val: float | None) -> float:
+        """Normalize value to [0..1] for Thingino mapping."""
+        if min_val is not None and min_val >= 0 and 0 <= value <= 1:
+            return value
+        return (value + 1) / 2
+
+    def _ptz_map_relative(self, value: float, min_val: float | None, max_val: float | None) -> float:
+        """Map a relative move value to Thingino steps."""
+        max_step = self._ptz_max_step(min_val, max_val)
+        if max_step is None:
+            return value
+        if self._ptz_is_normalized(value):
+            steps = round(value * max_step)
+        else:
+            steps = round(value)
+        if steps == 0 and value != 0:
+            steps = 1 if value > 0 else -1
+        steps = max(-max_step, min(max_step, steps))
+        return steps
+
+    def _ptz_map_absolute(self, value: float, min_val: float | None, max_val: float | None) -> float:
+        """Map an absolute move value to Thingino steps."""
+        if min_val is None or max_val is None:
+            return value
+        if self._ptz_is_normalized(value):
+            unit = self._ptz_normalize_to_unit(value, min_val)
+            steps = round(min_val + unit * (max_val - min_val))
+        else:
+            steps = round(value)
+        return self._ptz_clamp(steps, min_val, max_val)
+
     async def async_perform_ptz(
         self,
         profile: Profile,
@@ -604,7 +819,9 @@ class ONVIFDevice:
             return
 
         try:
-            ptz_service = await self.device.create_ptz_service()
+            ptz_service = await self._async_onvif_call(
+                "create_ptz_service", self.device.create_ptz_service
+            )
         except GET_CAPABILITIES_EXCEPTIONS as err:
             LOGGER.warning(
                 "%s: Failed to create PTZ service for action %s: %s",
@@ -613,6 +830,9 @@ class ONVIFDevice:
                 err,
             )
             return
+
+        limits = profile.ptz_limits
+        thingino_mode = self.thingino_ptz_mode and limits is not None
 
         pan_val = distance * PAN_FACTOR.get(pan, 0)
         tilt_val = distance * TILT_FACTOR.get(tilt, 0)
@@ -655,11 +875,15 @@ class ONVIFDevice:
 
                 req.Velocity = velocity
 
-                await ptz_service.ContinuousMove(req)
+                await self._async_onvif_call(
+                    "ContinuousMove", ptz_service.ContinuousMove, req
+                )
                 await asyncio.sleep(continuous_duration)
                 req = ptz_service.create_type("Stop")
                 req.ProfileToken = profile.token
-                await ptz_service.Stop(
+                await self._async_onvif_call(
+                    "Stop",
+                    ptz_service.Stop,
                     {"ProfileToken": req.ProfileToken, "PanTilt": True, "Zoom": False}
                 )
             elif move_mode == RELATIVE_MOVE:
@@ -675,16 +899,64 @@ class ONVIFDevice:
                         self.name,
                     )
 
-                req.Translation = {
-                    "PanTilt": {"x": pan_val, "y": tilt_val},
-                    "Zoom": {"x": zoom_val},
-                }
+                if thingino_mode:
+                    original_pan = pan_val
+                    original_tilt = tilt_val
+                    pan_mode = (
+                        "normalized" if self._ptz_is_normalized(original_pan) else "steps"
+                    )
+                    tilt_mode = (
+                        "normalized" if self._ptz_is_normalized(original_tilt) else "steps"
+                    )
+                    pan_val = (
+                        self._ptz_map_relative(
+                            pan_val, limits.pan_min, limits.pan_max
+                        )
+                        if pan is not None
+                        else 0
+                    )
+                    tilt_val = (
+                        self._ptz_map_relative(
+                            tilt_val, limits.tilt_min, limits.tilt_max
+                        )
+                        if tilt is not None
+                        else 0
+                    )
+                    self.ptz_mapping_mode = "thingino_relative"
+                    LOGGER.debug(
+                        "%s: Thingino RelativeMove map pan(%s)=%s->%s tilt(%s)=%s->%s range=(%s..%s/%s..%s)",
+                        self.name,
+                        pan_mode,
+                        original_pan,
+                        pan_val,
+                        tilt_mode,
+                        original_tilt,
+                        tilt_val,
+                        limits.pan_min,
+                        limits.pan_max,
+                        limits.tilt_min,
+                        limits.tilt_max,
+                    )
+                    if zoom is not None and limits.zoom_max in (0, 0.0):
+                        LOGGER.debug(
+                            "%s: Thingino zoom range is 0; skipping zoom for RelativeMove",
+                            self.name,
+                        )
+                        zoom = None
+                        zoom_val = 0
+
+                translation = {"PanTilt": {"x": pan_val, "y": tilt_val}}
+                if zoom is not None:
+                    translation["Zoom"] = {"x": zoom_val}
+                req.Translation = translation
                 if speed_val is not None:
                     req.Speed = {
                         "PanTilt": {"x": speed_val, "y": speed_val},
                         "Zoom": {"x": speed_val},
                     }
-                await ptz_service.RelativeMove(req)
+                await self._async_onvif_call(
+                    "RelativeMove", ptz_service.RelativeMove, req
+                )
             elif move_mode == ABSOLUTE_MOVE:
                 # Guard against unsupported operation
                 if profile.ptz and not profile.ptz.absolute and not self.ptz_fallback:
@@ -698,16 +970,56 @@ class ONVIFDevice:
                         self.name,
                     )
 
-                req.Position = {
-                    "PanTilt": {"x": pan_val, "y": tilt_val},
-                    "Zoom": {"x": zoom_val},
-                }
+                if thingino_mode:
+                    original_pan = pan_val
+                    original_tilt = tilt_val
+                    pan_mode = (
+                        "normalized" if self._ptz_is_normalized(original_pan) else "steps"
+                    )
+                    tilt_mode = (
+                        "normalized" if self._ptz_is_normalized(original_tilt) else "steps"
+                    )
+                    pan_val = self._ptz_map_absolute(
+                        pan_val, limits.pan_min, limits.pan_max
+                    )
+                    tilt_val = self._ptz_map_absolute(
+                        tilt_val, limits.tilt_min, limits.tilt_max
+                    )
+                    self.ptz_mapping_mode = "thingino_absolute"
+                    LOGGER.debug(
+                        "%s: Thingino AbsoluteMove map pan(%s)=%s->%s tilt(%s)=%s->%s range=(%s..%s/%s..%s)",
+                        self.name,
+                        pan_mode,
+                        original_pan,
+                        pan_val,
+                        tilt_mode,
+                        original_tilt,
+                        tilt_val,
+                        limits.pan_min,
+                        limits.pan_max,
+                        limits.tilt_min,
+                        limits.tilt_max,
+                    )
+                    if zoom is not None and limits.zoom_max in (0, 0.0):
+                        LOGGER.debug(
+                            "%s: Thingino zoom range is 0; skipping zoom for AbsoluteMove",
+                            self.name,
+                        )
+                        zoom = None
+                        zoom_val = 0
+
+                position = {"PanTilt": {"x": pan_val, "y": tilt_val}}
+                if zoom is not None:
+                    position["Zoom"] = {"x": zoom_val}
+                req.Position = position
                 if speed_val is not None:
                     req.Speed = {
                         "PanTilt": {"x": speed_val, "y": speed_val},
                         "Zoom": {"x": speed_val},
                     }
-                await ptz_service.AbsoluteMove(req)
+                await self._async_onvif_call(
+                    "AbsoluteMove", ptz_service.AbsoluteMove, req
+                )
             elif move_mode == GOTOPRESET_MOVE:
                 # Guard against unsupported operation
                 if profile.ptz and profile.ptz.presets is not None:
@@ -735,11 +1047,17 @@ class ONVIFDevice:
                         "PanTilt": {"x": speed_val, "y": speed_val},
                         "Zoom": {"x": speed_val},
                     }
-                await ptz_service.GotoPreset(req)
+                await self._async_onvif_call("GotoPreset", ptz_service.GotoPreset, req)
             elif move_mode == STOP_MOVE:
-                await ptz_service.Stop(req)
+                await self._async_onvif_call("Stop", ptz_service.Stop, req)
         except ONVIFError as err:
-            if "Bad Request" in err.reason:
+            reason = getattr(err, "reason", "") or str(err)
+            if "Invalid position" in reason:
+                LOGGER.debug(
+                    "%s: PTZ request rejected with Invalid position: %s", self.name, err
+                )
+                return
+            if "Bad Request" in reason:
                 LOGGER.warning("Device '%s' doesn't support PTZ", self.name)
             else:
                 LOGGER.error("Error trying to perform PTZ action: %s", err)
@@ -783,7 +1101,9 @@ class ONVIFDevice:
         try:
             req = ptz_service.create_type("GotoHomePosition")
             req.ProfileToken = profile.token
-            await ptz_service.GotoHomePosition(req)
+            await self._async_onvif_call(
+                "GotoHomePosition", ptz_service.GotoHomePosition, req
+            )
         except ONVIFError as err:
             LOGGER.error("Error trying to go to Home position: %s", err)
 
@@ -801,7 +1121,9 @@ class ONVIFDevice:
         try:
             req = ptz_service.create_type("SetHomePosition")
             req.ProfileToken = profile.token
-            await ptz_service.SetHomePosition(req)
+            await self._async_onvif_call(
+                "SetHomePosition", ptz_service.SetHomePosition, req
+            )
         except ONVIFError as err:
             LOGGER.error("Error trying to set Home position: %s", err)
 
@@ -827,7 +1149,7 @@ class ONVIFDevice:
                     "PanTilt": {"x": speed, "y": speed},
                     "Zoom": {"x": speed},
                 }
-            await ptz_service.GotoPreset(req)
+            await self._async_onvif_call("GotoPreset", ptz_service.GotoPreset, req)
         except ONVIFError as err:
             LOGGER.error("Error trying to go to PTZ preset '%s': %s", preset, err)
 
@@ -852,7 +1174,9 @@ class ONVIFDevice:
             req.ProfileToken = profile.token
             req.PresetToken = preset
             req.PresetName = name or preset
-            token = await ptz_service.SetPreset(req)
+            token = await self._async_onvif_call(
+                "SetPreset", ptz_service.SetPreset, req
+            )
         except ONVIFError as err:
             LOGGER.error("Error trying to set PTZ preset '%s': %s", preset, err)
             return None
@@ -874,7 +1198,9 @@ class ONVIFDevice:
             req = ptz_service.create_type("RemovePreset")
             req.ProfileToken = profile.token
             req.PresetToken = preset
-            await ptz_service.RemovePreset(req)
+            await self._async_onvif_call(
+                "RemovePreset", ptz_service.RemovePreset, req
+            )
         except ONVIFError as err:
             LOGGER.error("Error trying to remove PTZ preset '%s': %s", preset, err)
 
@@ -885,7 +1211,9 @@ class ONVIFDevice:
 
         try:
             ptz_service = await self.device.create_ptz_service()
-            presets = await ptz_service.GetPresets(profile.token)
+            presets = await self._async_onvif_call(
+                "GetPresets", ptz_service.GetPresets, profile.token
+            )
         except GET_CAPABILITIES_EXCEPTIONS:
             LOGGER.debug(
                 "%s: Failed to refresh presets for profile %s",
@@ -917,6 +1245,17 @@ class ONVIFDevice:
             self.thingino_relays = onvif_relays
             self.thingino_extras_source = "onvif"
 
+        http_username = (
+            options.get(CONF_THINGINO_HTTP_USERNAME)
+            or self.config_entry.data.get(CONF_THINGINO_HTTP_USERNAME)
+            or self.username
+        )
+        http_password = (
+            options.get(CONF_THINGINO_HTTP_PASSWORD)
+            or self.config_entry.data.get(CONF_THINGINO_HTTP_PASSWORD)
+            or self.password
+        )
+
         self.thingino_extras_endpoint = options.get(CONF_THINGINO_EXTRAS_ENDPOINT)
         if self.thingino_extras_endpoint == "":
             self.thingino_extras_endpoint = None
@@ -929,11 +1268,17 @@ class ONVIFDevice:
         payload: dict[str, Any] | None = None
         endpoint_used: str | None = None
         if self.thingino_extras_endpoint:
-            payload = await self._async_fetch_thingino_json(self.thingino_extras_endpoint)
+            payload = await self._async_fetch_thingino_json(
+                self.thingino_extras_endpoint,
+                http_username,
+                http_password,
+            )
             endpoint_used = self.thingino_extras_endpoint if payload else None
         else:
             for candidate in DEFAULT_THINGINO_EXTRAS_ENDPOINTS:
-                payload = await self._async_fetch_thingino_json(candidate)
+                payload = await self._async_fetch_thingino_json(
+                    candidate, http_username, http_password
+                )
                 if payload is not None:
                     endpoint_used = candidate
                     break
@@ -960,13 +1305,18 @@ class ONVIFDevice:
             self.thingino_extras_endpoint = endpoint_used
 
         self._parse_thingino_extras(payload)
+        self.thingino_ptz_mode = True
 
     async def _async_discover_onvif_relays(self) -> list[ThinginoRelay]:
         """Discover relay outputs via ONVIF DeviceIO."""
         try:
-            deviceio = await self.device.create_deviceio_service()
-            outputs = await deviceio.GetRelayOutputs()
-        except GET_CAPABILITIES_EXCEPTIONS:
+            deviceio = await self._async_onvif_call(
+                "create_deviceio_service", self.device.create_deviceio_service
+            )
+            outputs = await self._async_onvif_call(
+                "GetRelayOutputs", deviceio.GetRelayOutputs
+            )
+        except (GET_CAPABILITIES_EXCEPTIONS, XMLParseError, TypeError, ValueError):
             return []
 
         if not isinstance(outputs, list):
@@ -996,54 +1346,30 @@ class ONVIFDevice:
             LOGGER.debug("%s: ONVIF relay outputs discovered: %s", self.name, relays)
         return relays
 
-    async def _async_fetch_thingino_json(self, endpoint: str) -> dict[str, Any] | None:
+    async def _async_fetch_thingino_json(
+        self, endpoint: str, username: str | None, password: str | None
+    ) -> dict[str, Any] | None:
         """Fetch Thingino onvif.json payload from an endpoint."""
-        url = self._build_thingino_url(endpoint)
-        session = async_get_clientsession(self.hass)
-        auth = aiohttp.BasicAuth(self.username, self.password) if self.username else None
-        try:
-            async with session.get(
-                url,
-                auth=auth,
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as response:
-                if response.status != 200:
-                    LOGGER.debug(
-                        "%s: Thingino extras endpoint %s returned %s",
-                        self.name,
-                        url,
-                        response.status,
-                    )
-                    return None
-                try:
-                    data = await response.json(content_type=None)
-                except (aiohttp.ContentTypeError, json.JSONDecodeError):
-                    text = await response.text()
-                    LOGGER.debug(
-                        "%s: Thingino extras endpoint %s returned non-JSON payload: %s",
-                        self.name,
-                        url,
-                        text,
-                    )
-                    return None
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        payload, status = await async_fetch_thingino_onvif_json(
+            self.hass,
+            self.host,
+            self.port,
+            endpoint or DEFAULT_THINGINO_INFO_ENDPOINT,
+            username,
+            password,
+        )
+        if status == 401:
+            LOGGER.debug("%s: Thingino HTTP auth required for %s", self.name, endpoint)
+            return None
+        if payload is None:
             LOGGER.debug(
-                "%s: Failed to fetch Thingino extras from %s: %s",
+                "%s: Thingino extras endpoint %s did not return valid JSON",
                 self.name,
-                url,
-                err,
+                endpoint,
             )
             return None
-
-        if not isinstance(data, dict):
-            LOGGER.debug(
-                "%s: Thingino extras payload from %s is not a JSON object",
-                self.name,
-                url,
-            )
-            return None
-        LOGGER.debug("%s: Thingino extras discovered at %s", self.name, url)
-        return data
+        LOGGER.debug("%s: Thingino extras discovered at %s", self.name, endpoint)
+        return payload
 
     def _build_thingino_url(self, endpoint: str) -> str:
         """Build a full URL for a Thingino endpoint."""
@@ -1168,11 +1494,15 @@ class ONVIFDevice:
     ) -> None:
         """Set ONVIF relay output state."""
         try:
-            deviceio = await self.device.create_deviceio_service()
+            deviceio = await self._async_onvif_call(
+                "create_deviceio_service", self.device.create_deviceio_service
+            )
             req = deviceio.create_type("SetRelayOutputState")
             req.RelayOutputToken = token
             req.LogicalState = "active" if state else "inactive"
-            await deviceio.SetRelayOutputState(req)
+            await self._async_onvif_call(
+                "SetRelayOutputState", deviceio.SetRelayOutputState, req
+            )
         except GET_CAPABILITIES_EXCEPTIONS as err:
             LOGGER.warning(
                 "%s: Failed to set relay output %s: %s", self.name, token, err
@@ -1207,7 +1537,20 @@ class ONVIFDevice:
         LOGGER.debug("%s: Thingino exec '%s' via %s", self.name, cmd, safe_url)
 
         session = async_get_clientsession(self.hass)
-        auth = aiohttp.BasicAuth(self.username, self.password) if self.username else None
+        options = self.config_entry.options
+        http_username = (
+            options.get(CONF_THINGINO_HTTP_USERNAME)
+            or self.config_entry.data.get(CONF_THINGINO_HTTP_USERNAME)
+            or self.username
+        )
+        http_password = (
+            options.get(CONF_THINGINO_HTTP_PASSWORD)
+            or self.config_entry.data.get(CONF_THINGINO_HTTP_PASSWORD)
+            or self.password
+        )
+        auth = (
+            aiohttp.BasicAuth(http_username, http_password) if http_username else None
+        )
         try:
             async with session.request(
                 method,
@@ -1259,7 +1602,9 @@ class ONVIFDevice:
             req = ptz_service.create_type("SendAuxiliaryCommand")
             req.ProfileToken = profile.token
             req.AuxiliaryData = cmd
-            await ptz_service.SendAuxiliaryCommand(req)
+            await self._async_onvif_call(
+                "SendAuxiliaryCommand", ptz_service.SendAuxiliaryCommand, req
+            )
         except ONVIFError as err:
             if "Bad Request" in err.reason:
                 LOGGER.warning("Device '%s' doesn't support PTZ", self.name)
@@ -1303,13 +1648,28 @@ def get_device(
     port: int,
     username: str | None,
     password: str | None,
+    session: aiohttp.ClientSession | None = None,
 ) -> ONVIFCamera:
     """Get ONVIFCamera instance."""
+    wsdl_path = f"{os.path.dirname(onvif.__file__)}/wsdl/"
+    if session is not None:
+        try:
+            return ONVIFCamera(
+                host,
+                port,
+                username,
+                password,
+                wsdl_path,
+                no_cache=True,
+                session=session,
+            )
+        except TypeError:
+            pass
     return ONVIFCamera(
         host,
         port,
         username,
         password,
-        f"{os.path.dirname(onvif.__file__)}/wsdl/",
+        wsdl_path,
         no_cache=True,
     )

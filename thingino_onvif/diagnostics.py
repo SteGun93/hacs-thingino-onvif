@@ -45,6 +45,10 @@ async def async_get_config_entry_diagnostics(
             "service_endpoint": device.ptz_service_available,
             "runtime_probe": device.ptz_supported_runtime,
             "tolerant_mode": device.ptz_fallback,
+            "thingino_mode": device.thingino_ptz_mode,
+            "mapping_mode": device.ptz_mapping_mode,
+            "retry_count": device.onvif_retry_count,
+            "reset_count": device.onvif_reset_count,
         },
         "thingino_extras": {
             "enabled": device.thingino_extras_enabled,

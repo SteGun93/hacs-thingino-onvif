@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import suppress
 import logging
 from pprint import pformat
 from typing import Any
@@ -49,16 +50,20 @@ from .const import (
     CONF_THINGINO_EXTRAS_ENDPOINT,
     CONF_THINGINO_EXTRAS_JSON,
     CONF_THINGINO_EXEC_ENDPOINT,
+    CONF_THINGINO_HTTP_PASSWORD,
+    CONF_THINGINO_HTTP_USERNAME,
     DEFAULT_ARGUMENTS,
     DEFAULT_ENABLE_WEBHOOKS,
     DEFAULT_PORT,
     DEFAULT_THINGINO_EXTRAS_ENABLED,
+    DEFAULT_THINGINO_INFO_ENDPOINT,
     DEFAULT_THINGINO_EXEC_ENDPOINT,
     DOMAIN,
     GET_CAPABILITIES_EXCEPTIONS,
     LOGGER,
 )
 from .device import get_device
+from .thingino_http import async_fetch_thingino_onvif_json
 
 CONF_MANUAL_INPUT = "Manually configure ONVIF device"
 
@@ -129,6 +134,8 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
         self.device_id = None
         self.devices: list[dict[str, Any]] = []
         self.onvif_config: dict[str, Any] = {}
+        self.thingino_http_username: str | None = None
+        self.thingino_http_password: str | None = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -256,6 +263,7 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
                 data_schema=vol.Schema({vol.Optional(CONF_HOST): vol.In(devices)}),
             )
 
+        LOGGER.debug("WS-Discovery found no ONVIF devices; using manual host if provided")
         return await self.async_step_configure()
 
     async def async_step_configure(
@@ -266,8 +274,20 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
         description_placeholders: dict[str, str] = {}
         if user_input:
             self.onvif_config = user_input
+            if not self.devices:
+                LOGGER.debug(
+                    "Discovery skipped/empty; configuring ONVIF device manually at %s:%s",
+                    self.onvif_config[CONF_HOST],
+                    self.onvif_config[CONF_PORT],
+                )
             errors, description_placeholders = await self.async_setup_profiles()
             if not errors:
+                thingino_status = await self._async_check_thingino_http(
+                    self.onvif_config.get(CONF_USERNAME),
+                    self.onvif_config.get(CONF_PASSWORD),
+                )
+                if thingino_status == 401:
+                    return await self.async_step_thingino_http_auth()
                 title = f"{self.onvif_config[CONF_NAME]} - {self.device_id}"
                 return self.async_create_entry(title=title, data=self.onvif_config)
 
@@ -293,6 +313,77 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
             description_placeholders=description_placeholders,
         )
 
+    async def async_step_thingino_http_auth(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle Thingino HTTP authentication."""
+        errors: dict[str, str] = {}
+        if user_input:
+            self.thingino_http_username = user_input[CONF_THINGINO_HTTP_USERNAME]
+            self.thingino_http_password = user_input[CONF_THINGINO_HTTP_PASSWORD]
+            status = await self._async_check_thingino_http(
+                self.thingino_http_username,
+                self.thingino_http_password,
+            )
+            if status == 401:
+                errors["base"] = "auth_failed"
+            else:
+                self.onvif_config[CONF_THINGINO_HTTP_USERNAME] = (
+                    self.thingino_http_username
+                )
+                self.onvif_config[CONF_THINGINO_HTTP_PASSWORD] = (
+                    self.thingino_http_password
+                )
+                title = f"{self.onvif_config[CONF_NAME]} - {self.device_id}"
+                return self.async_create_entry(title=title, data=self.onvif_config)
+
+        return self.async_show_form(
+            step_id="thingino_http_auth",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_THINGINO_HTTP_USERNAME, default=""): str,
+                    vol.Required(CONF_THINGINO_HTTP_PASSWORD, default=""): str,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def _async_check_thingino_http(
+        self, username: str | None, password: str | None
+    ) -> int | None:
+        """Probe Thingino HTTP endpoint for onvif.json access."""
+        payload, status = await async_fetch_thingino_onvif_json(
+            self.hass,
+            self.onvif_config[CONF_HOST],
+            self.onvif_config[CONF_PORT],
+            DEFAULT_THINGINO_INFO_ENDPOINT,
+            username,
+            password,
+            retries=1,
+        )
+        if status == 200 and payload is not None:
+            LOGGER.debug(
+                "Thingino HTTP probe succeeded for %s:%s",
+                self.onvif_config[CONF_HOST],
+                self.onvif_config[CONF_PORT],
+            )
+            return 200
+        if status == 401:
+            LOGGER.debug(
+                "Thingino HTTP probe requires auth for %s:%s",
+                self.onvif_config[CONF_HOST],
+                self.onvif_config[CONF_PORT],
+            )
+            return 401
+        if status:
+            LOGGER.debug(
+                "Thingino HTTP probe returned status %s for %s:%s",
+                status,
+                self.onvif_config[CONF_HOST],
+                self.onvif_config[CONF_PORT],
+            )
+        return status
+
     async def async_setup_profiles(
         self, configure_unique_id: bool = True
     ) -> tuple[dict[str, str], dict[str, str]]:
@@ -313,6 +404,28 @@ class OnvifFlowHandler(ConfigFlow, domain=DOMAIN):
         try:
             await device.update_xaddrs()
             device_mgmt = await device.create_devicemgmt_service()
+            LOGGER.debug(
+                "%s: Discovery xaddrs=%s",
+                self.onvif_config[CONF_NAME],
+                device.xaddrs,
+            )
+            with suppress(GET_CAPABILITIES_EXCEPTIONS, Fault):
+                services = await device_mgmt.GetServices(False)
+                if isinstance(services, list):
+                    LOGGER.debug(
+                        "%s: Discovery services=%s",
+                        self.onvif_config[CONF_NAME],
+                        [service.Namespace for service in services if service],
+                    )
+            with suppress(GET_CAPABILITIES_EXCEPTIONS, Fault):
+                device_info_probe = await device_mgmt.GetDeviceInformation()
+                LOGGER.debug(
+                    "%s: Discovery device info manufacturer=%s model=%s hardware=%s",
+                    self.onvif_config[CONF_NAME],
+                    device_info_probe.Manufacturer,
+                    device_info_probe.Model,
+                    getattr(device_info_probe, "HardwareId", None),
+                )
             # Get the MAC address to use as the unique ID for the config flow
             if not self.device_id:
                 try:
@@ -447,6 +560,14 @@ class OnvifOptionsFlowHandler(OptionsFlow):
                 CONF_THINGINO_EXTRAS_JSON,
                 self.config_entry.options.get(CONF_THINGINO_EXTRAS_JSON, ""),
             )
+            self.options[CONF_THINGINO_HTTP_USERNAME] = user_input.get(
+                CONF_THINGINO_HTTP_USERNAME,
+                self.config_entry.options.get(CONF_THINGINO_HTTP_USERNAME, ""),
+            )
+            self.options[CONF_THINGINO_HTTP_PASSWORD] = user_input.get(
+                CONF_THINGINO_HTTP_PASSWORD,
+                self.config_entry.options.get(CONF_THINGINO_HTTP_PASSWORD, ""),
+            )
             return self.async_create_entry(title="", data=self.options)
 
         advanced_options = {}
@@ -505,6 +626,18 @@ class OnvifOptionsFlowHandler(OptionsFlow):
                         CONF_THINGINO_EXTRAS_JSON,
                         default=self.config_entry.options.get(
                             CONF_THINGINO_EXTRAS_JSON, ""
+                        ),
+                    ): str,
+                    vol.Optional(
+                        CONF_THINGINO_HTTP_USERNAME,
+                        default=self.config_entry.options.get(
+                            CONF_THINGINO_HTTP_USERNAME, ""
+                        ),
+                    ): str,
+                    vol.Optional(
+                        CONF_THINGINO_HTTP_PASSWORD,
+                        default=self.config_entry.options.get(
+                            CONF_THINGINO_HTTP_PASSWORD, ""
                         ),
                     ): str,
                     **advanced_options,
