@@ -5,7 +5,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from .const import DOMAIN
+from .const import DOMAIN, RELATIVE_MOVE, STOP_MOVE
 from .device import ONVIFDevice
 from .entity import ONVIFBaseEntity
 from .models import Profile, ThinginoAuxCommand
@@ -23,9 +23,20 @@ async def async_setup_entry(
         SetSystemDateAndTimeButton(device),
     ]
     if device.capabilities.ptz:
-        entities += [GotoHomeButton(device), SetHomeButton(device)]
+        entities += [
+            GotoHomeButton(device),
+            SetHomeButton(device),
+        ]
         for profile in device.profiles:
             entities.append(ONVIFPresetGotoSelectedButton(device, profile))
+            entities.append(ONVIFAbsoluteMoveButton(device, profile))
+            entities.append(ONVIFRelativeMoveButton(device, profile, pan="LEFT"))
+            entities.append(ONVIFRelativeMoveButton(device, profile, pan="RIGHT"))
+            entities.append(ONVIFRelativeMoveButton(device, profile, tilt="UP"))
+            entities.append(ONVIFRelativeMoveButton(device, profile, tilt="DOWN"))
+            entities.append(ONVIFRelativeMoveButton(device, profile, zoom="ZOOM_IN"))
+            entities.append(ONVIFRelativeMoveButton(device, profile, zoom="ZOOM_OUT"))
+            entities.append(ONVIFStopMoveButton(device, profile))
     entities += [
         ThinginoAuxButton(device, command) for command in device.thingino_aux_commands
     ]
@@ -154,3 +165,104 @@ class ONVIFPresetGotoSelectedButton(ONVIFPresetActionBase):
             return
         await self.device.async_goto_preset(self.profile, token)
 
+
+class ONVIFAbsoluteMoveButton(ONVIFPresetActionBase):
+    """Button to run an absolute move using stored steps."""
+
+    _attr_icon = "mdi:axis-arrow"
+
+    def __init__(self, device: ONVIFDevice, profile: Profile) -> None:
+        """Initialize the absolute move button."""
+        super().__init__(device, profile)
+        self._attr_name = (
+            f"{self.device.name} Absolute Move{self._profile_suffix}"
+        )
+        self._attr_unique_id = f"{self.mac_or_serial}#{profile.token}_ptz_abs_move"
+
+    async def async_press(self) -> None:
+        """Run an absolute move using stored steps."""
+        pan = self.device.get_absolute_pan(self.profile)
+        tilt = self.device.get_absolute_tilt(self.profile)
+        speed = self.device.get_absolute_speed(self.profile)
+        await self.device.async_absolute_move_steps(self.profile, pan, tilt, speed, None)
+
+
+class ONVIFRelativeMoveButton(ONVIFPresetActionBase):
+    """Button for a relative move direction."""
+
+    _attr_icon = "mdi:arrow-up"
+
+    def __init__(
+        self,
+        device: ONVIFDevice,
+        profile: Profile,
+        *,
+        pan: str | None = None,
+        tilt: str | None = None,
+        zoom: str | None = None,
+    ) -> None:
+        """Initialize the relative move button."""
+        super().__init__(device, profile)
+        self._pan = pan
+        self._tilt = tilt
+        self._zoom = zoom
+        label = pan or tilt or zoom or "Move"
+        label = label.replace("ZOOM_", "Zoom ").title()
+        self._attr_name = f"{self.device.name} PTZ {label}{self._profile_suffix}"
+        self._attr_unique_id = (
+            f"{self.mac_or_serial}#{profile.token}_ptz_rel_{label.replace(' ', '_').lower()}"
+        )
+        if pan == "LEFT":
+            self._attr_icon = "mdi:arrow-left"
+        elif pan == "RIGHT":
+            self._attr_icon = "mdi:arrow-right"
+        elif tilt == "UP":
+            self._attr_icon = "mdi:arrow-up"
+        elif tilt == "DOWN":
+            self._attr_icon = "mdi:arrow-down"
+        elif zoom == "ZOOM_IN":
+            self._attr_icon = "mdi:magnify-plus"
+        elif zoom == "ZOOM_OUT":
+            self._attr_icon = "mdi:magnify-minus"
+
+    async def async_press(self) -> None:
+        """Perform a relative move."""
+        distance = self.device.get_relative_distance(self.profile)
+        speed = self.device.get_relative_speed(self.profile)
+        await self.device.async_perform_ptz(
+            self.profile,
+            distance,
+            speed,
+            RELATIVE_MOVE,
+            0,
+            None,
+            self._pan,
+            self._tilt,
+            self._zoom,
+        )
+
+
+class ONVIFStopMoveButton(ONVIFPresetActionBase):
+    """Button to stop PTZ motion."""
+
+    _attr_icon = "mdi:stop-circle"
+
+    def __init__(self, device: ONVIFDevice, profile: Profile) -> None:
+        """Initialize the stop button."""
+        super().__init__(device, profile)
+        self._attr_name = f"{self.device.name} PTZ Stop{self._profile_suffix}"
+        self._attr_unique_id = f"{self.mac_or_serial}#{profile.token}_ptz_stop"
+
+    async def async_press(self) -> None:
+        """Stop PTZ motion."""
+        await self.device.async_perform_ptz(
+            self.profile,
+            0,
+            None,
+            STOP_MOVE,
+            0,
+            None,
+            None,
+            None,
+            None,
+        )

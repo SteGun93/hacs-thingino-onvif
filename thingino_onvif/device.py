@@ -116,6 +116,11 @@ class ONVIFDevice:
         self._preset_token_name_map: dict[str, dict[str, str]] = {}
         self._preset_selection: dict[str, str] = {}
         self._preset_name_value: dict[str, str] = {}
+        self._ptz_relative_distance: dict[str, float] = {}
+        self._ptz_relative_speed: dict[str, float] = {}
+        self._ptz_absolute_pan: dict[str, float] = {}
+        self._ptz_absolute_tilt: dict[str, float] = {}
+        self._ptz_absolute_speed: dict[str, float] = {}
 
     async def _async_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry
@@ -1488,6 +1493,64 @@ class ONVIFDevice:
     def get_preset_name_value(self, profile: Profile) -> str | None:
         """Return the preset name text for a profile."""
         return self._preset_name_value.get(profile.token)
+
+    def get_relative_distance(self, profile: Profile) -> float:
+        """Return the stored relative move distance."""
+        return self._ptz_relative_distance.get(profile.token, 0.1)
+
+    def set_relative_distance(self, profile: Profile, value: float) -> None:
+        """Store the relative move distance."""
+        self._ptz_relative_distance[profile.token] = value
+
+    def get_relative_speed(self, profile: Profile) -> float | None:
+        """Return the stored relative speed, or None when unset."""
+        value = self._ptz_relative_speed.get(profile.token, 0.0)
+        return value if value > 0 else None
+
+    def get_relative_speed_value(self, profile: Profile) -> float:
+        """Return the stored relative speed as a value for UI."""
+        return self._ptz_relative_speed.get(profile.token, 0.0)
+
+    def set_relative_speed(self, profile: Profile, value: float) -> None:
+        """Store the relative speed (0 means auto)."""
+        self._ptz_relative_speed[profile.token] = value
+
+    def get_absolute_pan(self, profile: Profile) -> float:
+        """Return the stored absolute pan steps."""
+        if profile.ptz_limits and profile.ptz_limits.pan_min is not None:
+            default = float(profile.ptz_limits.pan_min)
+        else:
+            default = 0.0
+        return self._ptz_absolute_pan.get(profile.token, default)
+
+    def set_absolute_pan(self, profile: Profile, value: float) -> None:
+        """Store the absolute pan steps."""
+        self._ptz_absolute_pan[profile.token] = value
+
+    def get_absolute_tilt(self, profile: Profile) -> float:
+        """Return the stored absolute tilt steps."""
+        if profile.ptz_limits and profile.ptz_limits.tilt_min is not None:
+            default = float(profile.ptz_limits.tilt_min)
+        else:
+            default = 0.0
+        return self._ptz_absolute_tilt.get(profile.token, default)
+
+    def set_absolute_tilt(self, profile: Profile, value: float) -> None:
+        """Store the absolute tilt steps."""
+        self._ptz_absolute_tilt[profile.token] = value
+
+    def get_absolute_speed(self, profile: Profile) -> float | None:
+        """Return the stored absolute speed, or None when unset."""
+        value = self._ptz_absolute_speed.get(profile.token, 0.0)
+        return value if value > 0 else None
+
+    def get_absolute_speed_value(self, profile: Profile) -> float:
+        """Return the stored absolute speed as a value for UI."""
+        return self._ptz_absolute_speed.get(profile.token, 0.0)
+
+    def set_absolute_speed(self, profile: Profile, value: float) -> None:
+        """Store the absolute speed (0 means auto)."""
+        self._ptz_absolute_speed[profile.token] = value
 
     async def async_discover_thingino_extras(self) -> None:
         """Discover Thingino extras from ONVIF or HTTP endpoints."""
