@@ -70,11 +70,14 @@ CONF_SELECTED_DEVICES = "devices"
 
 
 def wsdiscovery() -> list[Service]:
-    """Get ONVIF Profile S devices from network."""
+    """Get ONVIF devices from network via WS-Discovery."""
+    LOGGER.debug("WS-Discovery: starting discovery")
+
     discovery = WSDiscovery(ttl=4, relates_to=True)
     try:
         discovery.start()
-        return discovery.searchServices(
+
+        services = discovery.searchServices(
             types=[
                 QName(
                     "http://www.onvif.org/ver10/network/wsdl",
@@ -84,8 +87,29 @@ def wsdiscovery() -> list[Service]:
             ],
             timeout=10,
         )
+
+        LOGGER.debug(
+            "WS-Discovery: searchServices returned %d service(s)",
+            len(services),
+        )
+
+        for svc in services:
+            LOGGER.debug(
+                "WS-Discovery: service EPR=%s XAddrs=%s Scopes=%s",
+                svc.getEPR(),
+                svc.getXAddrs(),
+                [s.getValue() for s in (svc.getScopes() or [])],
+            )
+
+        return services
+
+    except Exception as err:
+        LOGGER.exception("WS-Discovery: error during discovery: %s", err)
+        return []
+
     finally:
         discovery.stop()
+        LOGGER.debug("WS-Discovery: stopped discovery")
 
 
 async def async_discovery(hass: HomeAssistant) -> list[dict[str, Any]]:
