@@ -41,6 +41,9 @@ class ONVIFPresetSelect(ONVIFBaseEntity, SelectEntity):
         super().__init__(device)
         self.profile = profile
         self._attr_unique_id = f"{self.mac_or_serial}#{profile.token}_preset"
+        self._attr_entity_registry_enabled_default = (
+            profile.token == device.profiles[0].token
+        )
         self._option_to_token: dict[str, str] = {}
         self._token_to_option: dict[str, str] = {}
         self._sync_options()

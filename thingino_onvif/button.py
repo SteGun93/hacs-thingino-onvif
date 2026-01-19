@@ -135,6 +135,9 @@ class ONVIFPresetActionBase(ONVIFBaseEntity, ButtonEntity):
             f" ({profile.name})" if len(device.profiles) > 1 and profile.name else ""
         )
         self._profile_suffix = profile_suffix
+        self._attr_entity_registry_enabled_default = (
+            profile.token == device.profiles[0].token
+        )
 
     def _selected_token(self) -> str | None:
         """Return the selected preset token."""

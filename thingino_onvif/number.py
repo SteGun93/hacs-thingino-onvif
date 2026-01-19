@@ -38,6 +38,7 @@ class ONVIFNumberBase(ONVIFBaseEntity, NumberEntity, RestoreEntity):
     """Base class for ONVIF numbers."""
 
     _attr_has_entity_name = True
+    _attr_mode = "slider"
 
     def __init__(self, device: ONVIFDevice, profile: Profile) -> None:
         """Initialize the number entity."""
@@ -45,6 +46,9 @@ class ONVIFNumberBase(ONVIFBaseEntity, NumberEntity, RestoreEntity):
         self.profile = profile
         self._profile_suffix = (
             f" ({profile.name})" if len(device.profiles) > 1 and profile.name else ""
+        )
+        self._attr_entity_registry_enabled_default = (
+            profile.token == device.profiles[0].token
         )
 
     async def async_added_to_hass(self) -> None:
