@@ -223,10 +223,10 @@ set_preset:
       domain: camera
   fields:
     preset:
-      example: "1"
       selector:
         text:
     preset_name:
+      required: true
       selector:
         text:
 remove_preset:
@@ -237,5 +237,10 @@ remove_preset:
   fields:
     preset:
       example: "1"
+      selector:
+        text:
+    confirm:
+      required: true
+      example: "DELETE"
       selector:
         text:

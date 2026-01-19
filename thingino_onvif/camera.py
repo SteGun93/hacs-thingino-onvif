@@ -33,6 +33,7 @@ from .const import (
     ATTR_PAN,
     ATTR_PRESET,
     ATTR_PRESET_NAME,
+    ATTR_CONFIRM,
     ATTR_PAN_STEPS,
     ATTR_TILT_STEPS,
     ATTR_ZOOM_STEPS,
@@ -180,15 +181,18 @@ async def async_setup_entry(
     platform.async_register_entity_service(
         SERVICE_SET_PRESET,
         {
-            vol.Required(ATTR_PRESET): cv.string,
-            vol.Optional(ATTR_PRESET_NAME): cv.string,
+            vol.Optional(ATTR_PRESET): cv.string,
+            vol.Required(ATTR_PRESET_NAME): cv.string,
         },
         "async_set_preset",
     )
 
     platform.async_register_entity_service(
         SERVICE_REMOVE_PRESET,
-        {vol.Required(ATTR_PRESET): cv.string},
+        {
+            vol.Required(ATTR_PRESET): cv.string,
+            vol.Required(ATTR_CONFIRM): cv.string,
+        },
         "async_remove_preset",
     )
 
@@ -460,12 +464,15 @@ class ONVIFCameraEntity(ONVIFBaseEntity, Camera):
         """Go to a PTZ preset."""
         await self.device.async_goto_preset(self.profile, preset, speed)
 
-    async def async_set_preset(self, preset, preset_name=None) -> None:
+    async def async_set_preset(self, preset=None, preset_name=None) -> None:
         """Create or update a PTZ preset."""
-        if not preset:
+        if not preset_name:
             LOGGER.warning("%s: Preset name is required", self.device.name)
             return
-        token = await self.device.async_set_preset(self.profile, preset, preset_name)
+        preset_value = preset or preset_name
+        token = await self.device.async_set_preset(
+            self.profile, preset_value, preset_name
+        )
         await self.device.async_refresh_presets(self.profile)
         if token and self.profile.ptz:
             if self.profile.ptz.presets is None:
@@ -473,8 +480,13 @@ class ONVIFCameraEntity(ONVIFBaseEntity, Camera):
             elif token not in self.profile.ptz.presets:
                 self.profile.ptz.presets.append(token)
 
-    async def async_remove_preset(self, preset) -> None:
+    async def async_remove_preset(self, preset, confirm=None) -> None:
         """Remove a PTZ preset."""
+        if (confirm or "").strip().upper() != "DELETE":
+            LOGGER.warning(
+                "%s: Preset delete confirmation missing or invalid", self.device.name
+            )
+            return
         await self.device.async_remove_preset(self.profile, preset)
         await self.device.async_refresh_presets(self.profile)
         if self.profile.ptz and self.profile.ptz.presets:

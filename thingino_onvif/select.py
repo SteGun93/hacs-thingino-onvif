@@ -12,8 +12,6 @@ from .device import ONVIFDevice
 from .entity import ONVIFBaseEntity
 from .models import Profile
 
-NEW_PRESET_OPTION = "New preset..."
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -49,11 +47,6 @@ class ONVIFPresetSelect(ONVIFBaseEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         """Select a preset."""
-        if option == NEW_PRESET_OPTION:
-            self.device.set_selected_preset(self.profile, None)
-            self._attr_current_option = option
-            self.async_write_ha_state()
-            return
         token = self._option_to_token.get(option, option)
         self.device.set_selected_preset(self.profile, token)
         self._attr_current_option = self._token_to_option.get(token, option)
@@ -89,7 +82,6 @@ class ONVIFPresetSelect(ONVIFBaseEntity, SelectEntity):
             options.append(option)
             option_to_token[option] = token
             token_to_option[token] = option
-        options.insert(0, NEW_PRESET_OPTION)
         self._option_to_token = option_to_token
         self._token_to_option = token_to_option
         self._attr_options = options
