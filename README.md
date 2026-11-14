@@ -1,5 +1,7 @@
 # Thingino ONVIF PTZ (HACS)
 
+Beiträge und agentische Arbeit: [CONTRIBUTING.md](CONTRIBUTING.md) und [AGENTS.md](AGENTS.md).
+
 Custom Home Assistant Integration für **Thingino-basierte ONVIF-Kameras** mit Fokus auf **zuverlässiger PTZ-Steuerung**, Presets und sauberer Home-Assistant-Integration.
 
 Diese Integration ist ein **Fork der offiziellen Home-Assistant ONVIF Integration**, wurde jedoch gezielt angepasst, um mit günstigen PTZ-Kameras (z. B. Galayou Y4 / Ingenic T31) stabil zu funktionieren, auch wenn ONVIF-Capabilities unvollständig oder fehlerhaft gemeldet werden.
