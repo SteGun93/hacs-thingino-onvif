@@ -32,7 +32,7 @@ Lokal gezielt prüfen, was sich geändert hat; bei breiten Änderungen die betro
 | --- | --- |
 | Python | Syntax der geänderten Dateien mit einer zur Ziel-Home-Assistant-Version passenden Python-Version prüfen, ohne Import der Integration oder Verbindung zu Geräten |
 | Metadaten | `manifest.json`, `strings.json` und `icons.json` als JSON prüfen; Services, Übersetzungen, Domain und Entity-Referenzen abgleichen |
-| Logik | Gezielte Regressionstests mit gemockten ONVIF-/HTTP-Antworten ergänzen, wenn Verhalten geändert wird; derzeit ist keine eigene automatisierte Testsuite oder CI eingerichtet |
+| Logik/CI | `python -m pip install -r requirements-ci.txt`, `python tools/check_source.py`, `python -m unittest discover -s tests -v`; CI auf Python 3.14 prüft Syntax, Metadaten und isolierte Helpertests mit HTTP-Mocks |
 | Integration | In einer eigenen Home-Assistant-Testinstanz Setup, Reload und Cleanup prüfen; Hardwaretests und nötige Freigaben separat festhalten |
 | Doku/Skills | README-Aussagen gegen Code prüfen, insbesondere tatsächliche Servicenamen und Installationslayout; Verweise, Skill-Metadaten und `git diff --check` |
 
