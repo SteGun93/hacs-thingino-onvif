@@ -2,6 +2,18 @@
 
 Beiträge und agentische Arbeit: [CONTRIBUTING.md](CONTRIBUTING.md) und [AGENTS.md](AGENTS.md).
 
+## Automatisierte Prüfungen
+
+Die [CI](.github/workflows/ci.yml) läuft bei Pushs, Pull Requests und manuell mit Python 3.14. Sie prüft Python-Syntax ohne Integrationsimport, JSON/YAML-Metadaten, Domain und die installierten Manifest-Abhängigkeiten. Neun isolierte Helpertests decken JSON/HTML-Antworten, Authentifizierungsfehler, URL-Redaktion, stabile Event-Namen und begrenzte HTTP-Wiederholungen ab.
+
+```sh
+python -m pip install -r requirements-ci.txt
+python tools/check_source.py
+python -m unittest discover -s tests -v
+```
+
+Die Helpertests laden nur die betroffenen Module; kleine Home-Assistant-Import-Shims ersetzen keinen echten Home-Assistant-Lauf. Setup/Reload, vollständige API-Kompatibilität, HACS-Installation und Kamera-/PTZ-Hardware bleiben gesonderte Integrationsprüfungen. Die CI greift auf keine Kameras zu und veröffentlicht keine Version.
+
 Custom Home Assistant Integration für **Thingino-basierte ONVIF-Kameras** mit Fokus auf **zuverlässiger PTZ-Steuerung**, Presets und sauberer Home-Assistant-Integration.
 
 Diese Integration ist ein **Fork der offiziellen Home-Assistant ONVIF Integration**, wurde jedoch gezielt angepasst, um mit günstigen PTZ-Kameras (z. B. Galayou Y4 / Ingenic T31) stabil zu funktionieren, auch wenn ONVIF-Capabilities unvollständig oder fehlerhaft gemeldet werden.
